@@ -64,12 +64,12 @@
     "margin_x": 9,
     "margin_y": 7,
     "vertical_bias": 0.40,
-    "ink_head": "#a89e84",
-    "ink_sci": "#6a6254",
-    "ink_place": "#78705e",
-    "ink_remark": "#565042",
-    "ink_rule": "#3a342a",
-    "ink_bus": "#4a4438",
-    "max_channel": 190
+    "ink_head": "#b8ac90",
+    "ink_sci": "#9c9280",
+    "ink_place": "#a89e88",
+    "ink_remark": "#8e8574",
+    "ink_rule": "#544c40",
+    "ink_bus": "#847a68",
+    "max_channel": 200
   }
 }

@@ -98,13 +98,18 @@ DEFAULTS = {
     "show_rule": True,
 
     # Dim, warm ink on black. Nothing here should approach 255.
-    "ink_head": "#a89e84",
-    "ink_sci": "#6a6254",
-    "ink_rule": "#3a342a",
-    "ink_place": "#78705e",
-    "ink_remark": "#565042",
-    "ink_bus": "#4a4438",
-    "max_channel": 190,
+    #
+    # The headline is 22px and the body is 9-10px, so size already carries the
+    # hierarchy -- the small text doesn't need to be much darker to read as
+    # secondary, and at this size it can't afford to be. The secondary tiers
+    # sit close under the headline; the rule and the bus label stay quiet.
+    "ink_head": "#b8ac90",
+    "ink_sci": "#9c9280",
+    "ink_rule": "#544c40",
+    "ink_place": "#a89e88",
+    "ink_remark": "#8e8574",
+    "ink_bus": "#847a68",
+    "max_channel": 200,
 }
 
 # Keys whose values are numbers, for coercing preview query overrides.
