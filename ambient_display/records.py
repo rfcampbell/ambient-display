@@ -97,6 +97,22 @@ def _comma_prefixes(sentence):
     return [", ".join(keep[:n]) for n in range(len(keep), 0, -1)]
 
 
+def placard_remark(entry):
+    """Habitat candidates, best first, preferring the mixer's edited fragment.
+
+    translate.py writes `remark_placard`: one English sentence with the gear
+    and the thermometer already taken out, and null wherever nothing evocative
+    survived that edit. When it's there it beats anything we can mine locally,
+    because it was edited with the whole note in view. When it isn't, fall back
+    to mining -- from the translation if there is one, since English is better
+    raw material for the habitat-keyword search than the original Portuguese.
+    """
+    fragment = _clean(entry.get("remark_placard"))
+    if fragment:
+        return [_tidy(fragment)]
+    return habitat_remark(entry.get("remark_en") or entry.get("remark"))
+
+
 def habitat_remark(remark):
     """Habitat-ish candidates, best first."""
     remark = _clean(remark)
@@ -220,7 +236,7 @@ def _looks_like_binomial(name):
 
 
 def _kind_of(entry):
-    kind = _clean(entry.get("type")).split(",")[0].strip()
+    kind = _clean(entry.get("type_en") or entry.get("type")).split(",")[0].strip()
     return "" if kind.lower() in VAGUE_KINDS else kind
 
 
@@ -296,7 +312,7 @@ def build(contract, state=None, known_only=True, place_label="country"):
             headline=[h for h in headline if h] or [name or species],
             subhead=subhead,
             place=place_variants(entry),
-            remark=habitat_remark(entry.get("remark")),
+            remark=placard_remark(entry),
             when=when_text(entry),
             kind=_kind_of(entry),
             recordist=_clean(entry.get("recordist")),
