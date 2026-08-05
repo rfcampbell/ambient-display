@@ -1,4 +1,4 @@
-"""The display client: subscribe, compose, drift, fade, push."""
+"""The display client: subscribe, feature a recording, turn its pages."""
 
 import argparse
 import json
@@ -12,18 +12,20 @@ from datetime import datetime
 
 from PIL import Image
 
-from . import cards as cards_mod
 from . import config as config_mod
 from . import device as device_mod
-from . import motion, render
+from . import motion
+from . import records as records_mod
+from . import render
+from . import slides as slides_mod
 from .feed import Feed
 
 log = logging.getLogger("ambient-display")
 
 
 class Display:
-    """Owns the frame. Everything the panel and the preview show comes from
-    here, so they can never disagree."""
+    """Owns the frame. The panel and the preview both read it here, so they
+    can never disagree about what is on screen."""
 
     def __init__(self, cfg, feed):
         self.cfg = cfg
@@ -36,55 +38,63 @@ class Display:
                                   interval=b["interval_seconds"],
                                   ease=b["ease_seconds"])
         r = cfg["rotation"]
-        self.rotation = motion.Rotation(hold=r["hold_seconds"], fade=r["fade_seconds"])
+        self.feature = motion.Feature(min_dwell=r["feature_min_dwell_seconds"])
+        self.show = motion.SlideShow(hold=r["slide_hold_seconds"],
+                                     jitter=r["slide_hold_jitter"],
+                                     fade=r["slide_fade_seconds"])
 
         self.lock = threading.Lock()
         self.frame = Image.new("RGB", self.size, (0, 0, 0))
+        self.records = []
         self.brightness = 1.0
         self.offset = (0.0, 0.0)
+        self._featured = None
         self._cache = {}
-        self._dirty = True
 
     # -- content ------------------------------------------------------------
-
-    def cards(self):
-        return list(self.rotation.cards) or [cards_mod.idle_card()]
 
     def theme(self):
         return dict(self._theme)
 
-    def reload_cards(self, now=None):
+    def all_slides(self):
+        """Every slide of every sounding record -- what the preview browses."""
+        with self.lock:
+            records = list(self.records)
+        with_map = self.cfg["content"].get("with_map", True)
+        out = []
+        for record in records or [records_mod.idle_record()]:
+            out.extend(slides_mod.slides_for(record, with_map=with_map))
+        return out
+
+    def reload(self):
         contract, state = self.feed.snapshot()
         c = self.cfg["content"]
-        built = cards_mod.build(
-            contract, state,
-            known_only=c.get("known_only", True),
-            subtitle_blocklist=c.get("subtitle_blocklist"),
-        )
-        self.rotation.update(built, now if now is not None else time.monotonic())
-        self._dirty = True
+        built = records_mod.build(contract, state,
+                                  known_only=c.get("known_only", True),
+                                  place_label=c.get("place_label", "country"))
+        with self.lock:
+            self.records = built
 
     def on_feed_change(self):
-        self.reload_cards()
+        self.reload()
 
     # -- rendering ----------------------------------------------------------
 
-    def _render(self, card, offset, theme=None):
-        """Card at full brightness, memoised on (card, offset)."""
-        t = theme or self._theme
+    def _render(self, slide, offset, theme=None):
+        """A slide at full brightness, memoised on (slide, offset)."""
         if theme is not None:
-            return render.render_card(card, t, self.size, offset)
-        key = (card.key, round(offset[0], 2), round(offset[1], 2))
+            return render.render_slide(slide, theme, self.size, offset)
+        key = (slide.key, round(offset[0], 2), round(offset[1], 2))
         image = self._cache.get(key)
         if image is None:
-            image = render.render_card(card, t, self.size, offset)
+            image = render.render_slide(slide, self._theme, self.size, offset)
             if len(self._cache) > 24:
                 self._cache.clear()
             self._cache[key] = image
         return image
 
     def render_still(self, index, overrides=None):
-        """A card with no drift and no night fade, for the preview bench.
+        """A slide with no drift and no night fade, for the preview bench.
 
         In dev mode the config is re-read first, so editing config.json and
         hitting refresh is enough to see a change.
@@ -98,9 +108,11 @@ class Display:
         t = dict(self._theme)
         if overrides:
             t.update(overrides)
-        cards = self.cards()
-        card = cards[max(0, min(len(cards) - 1, index))]
-        return render.render_card(card, t, self.size, (0.0, 0.0))
+        items = self.all_slides()
+        if not items:
+            return Image.new("RGB", self.size, (0, 0, 0))
+        slide = items[max(0, min(len(items) - 1, index))]
+        return render.render_slide(slide, t, self.size, (0.0, 0.0))
 
     def live_frame(self):
         with self.lock:
@@ -108,15 +120,25 @@ class Display:
 
     def tick(self, now, wall=None):
         """Advance every slow thing by one frame and compose."""
+        with self.lock:
+            records = list(self.records)
+
+        # Featuring is decided every frame, not only when the feed changes:
+        # a bus that became the newest while another was still inside its
+        # minimum dwell has to be picked up once that dwell expires.
+        record = self.feature.choose(records, now) or records_mod.idle_record()
+        if self._featured != record.key:
+            self._featured = record.key
+            self.show.set(slides_mod.slides_for(
+                record, with_map=self.cfg["content"].get("with_map", True)), now)
+
         offset = self.drift.offset(now)
         brightness = motion.brightness_at(wall or datetime.now(), self.cfg["schedule"])
         brightness *= float(self.cfg["display"].get("brightness", 1.0))
 
-        outgoing, incoming, alpha = self.rotation.tick(now)
-        if incoming is None:
-            incoming = cards_mod.idle_card()
+        outgoing, incoming, alpha = self.show.tick(now)
 
-        if brightness <= 0.0:
+        if brightness <= 0.0 or incoming is None:
             # Overnight: push true black rather than a dimmed placard.
             image = Image.new("RGB", self.size, (0, 0, 0))
         else:
@@ -136,19 +158,24 @@ class Display:
         s = self.feed.status()
         with self.lock:
             s.update({"brightness": round(self.brightness, 3),
-                      "offset": [round(v, 2) for v in self.offset]})
-        s["cards"] = len(self.rotation.cards)
+                      "offset": [round(v, 2) for v in self.offset],
+                      "records": len(self.records)})
+        showing = self.show.current()
+        s["featured"] = self._featured
+        s["slide"] = showing.kind if showing else None
+        s["slides"] = len(self.show.slides)
         return s
 
 
-def _sheet(display, path, scale=4):
-    """Contact sheet of every current card -- quick way to eyeball layout."""
-    cards = display.cards()
-    images = [render.render_card(c, display.theme(), display.size) for c in cards]
+def _sheet(display, path, scale=3):
+    """Every slide of every sounding record, side by side."""
+    items = display.all_slides()
+    t = display.theme()
+    images = [render.render_slide(s, t, display.size) for s in items]
     w, h = display.size
-    pad = 8
-    sheet = Image.new("RGB", (len(images) * (w * scale + pad) + pad, h * scale + 2 * pad),
-                      (24, 24, 24))
+    pad = 6
+    sheet = Image.new("RGB", (len(images) * (w * scale + pad) + pad,
+                              h * scale + 2 * pad), (24, 24, 24))
     for i, image in enumerate(images):
         sheet.paste(image.resize((w * scale, h * scale), Image.NEAREST),
                     (pad + i * (w * scale + pad), pad))
@@ -174,7 +201,7 @@ def build_args():
                    help="ignore the overnight schedule (development)")
     p.add_argument("--once", metavar="OUT.png", help="render one frame and exit")
     p.add_argument("--sheet", metavar="OUT.png",
-                   help="render every current card side by side and exit")
+                   help="render every slide of every record and exit")
     p.add_argument("--log-level", default="INFO")
     return p
 
@@ -214,24 +241,19 @@ def main(argv=None):
             with open(state_path, encoding="utf-8") as handle:
                 state = json.load(handle)
         feed.inject(contract, state)
-        log.info("replaying %s (%d cards)", args.replay, len(display.cards()))
     elif not args.no_mqtt:
         feed.start()
 
-    display.reload_cards()
+    display.reload()
 
-    if args.sheet:
+    if args.sheet or args.once:
         if not offline:
             _wait_for_content(display, 5.0)
-        print(_sheet(display, args.sheet))
-        feed.stop()
-        return 0
-
-    if args.once:
-        if not offline:
-            _wait_for_content(display, 5.0)
-        display.tick(time.monotonic()).save(args.once)
-        print(args.once)
+        if args.sheet:
+            print(_sheet(display, args.sheet))
+        if args.once:
+            display.tick(time.monotonic()).save(args.once)
+            print(args.once)
         feed.stop()
         return 0
 
@@ -282,7 +304,7 @@ def _wait_for_content(display, timeout):
     while time.monotonic() < deadline:
         contract, _ = display.feed.snapshot()
         if contract is not None:
-            display.reload_cards()
+            display.reload()
             return True
         time.sleep(0.2)
     log.warning("no contract received within %.0fs", timeout)

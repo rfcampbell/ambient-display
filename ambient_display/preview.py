@@ -46,9 +46,9 @@ PAGE = """<!doctype html>
 <div class="row">
   <figure><img id="live1" width="128" height="128"><figcaption>live 1&times;</figcaption></figure>
   <figure><img id="live4" width="512" height="512"><figcaption>live 4&times;</figcaption></figure>
-  <figure><img id="still" width="512" height="512"><figcaption id="stillcap">still 4&times;</figcaption></figure>
+  <figure><img id="still" width="512" height="512"><figcaption id="stillcap">still 4&times; (no drift, no night fade)</figcaption></figure>
   <aside>
-    <fieldset><legend>card</legend>
+    <fieldset><legend>slide</legend>
       <select id="card"></select>
       <button id="reload">reload</button>
     </fieldset>
@@ -60,11 +60,15 @@ PAGE = """<!doctype html>
   </aside>
 </div>
 <script>
-const KEYS = ["family","head_sizes","head_max_lines","head_leading","sci_size",
- "place_size","remark_size","remark_max_lines","bus_size","bus_tracking",
- "margin_x","margin_y","vertical_bias","gap_bus_head","gap_head_sci",
- "gap_sci_rule","gap_rule_place","gap_place_remark","rule_width","max_channel",
- "ink_head","ink_sci","ink_place","ink_remark","ink_rule","ink_bus"];
+const KEYS = ["family","head_font","sub_font","place_font","body_font",
+ "label_font","head_sizes","head_max_lines","head_leading","head_min_size",
+ "sub_size","place_size","place_max_lines","body_sizes","body_max_lines",
+ "body_leading","foot_size","label_size","label_tracking","map_height",
+ "margin_x","margin_y","vertical_bias","gap_label_head","gap_head_sub",
+ "gap_sub_rule","gap_rule_place","gap_label_body","gap_body_foot",
+ "gap_label_map","gap_map_foot","rule_width","max_channel",
+ "ink_head","ink_sub","ink_place","ink_body","ink_foot","ink_label",
+ "ink_rule","ink_coast","ink_dot"];
 let base = {}, families = [];
 
 function overrides() {
@@ -119,13 +123,13 @@ function buildControls() {
 async function load() {
   base = await (await fetch("/theme.json")).json();
   families = await (await fetch("/families.json")).json();
-  const cards = await (await fetch("/cards.json")).json();
+  const cards = await (await fetch("/slides.json")).json();
   const sel = document.getElementById("card");
   const keep = sel.value;
   sel.innerHTML = "";
   cards.forEach((c, i) => {
     const opt = document.createElement("option");
-    opt.value = i; opt.textContent = c.bus + " · " + c.title;
+    opt.value = i; opt.textContent = c.kind + " · " + (c.head || c.body || c.label);
     sel.appendChild(opt);
   });
   if (keep) sel.value = keep;
@@ -143,7 +147,7 @@ setInterval(async () => {
   const s = await (await fetch("/status.json")).json();
   document.getElementById("status").textContent =
     "mqtt " + (s.connected ? "connected" : "offline") + " · " + s.broker +
-    " · cards " + s.cards + " · brightness " + s.brightness.toFixed(2) +
+    " · " + s.records + " rec / " + s.slides + " slides · " + (s.slide||"-") + " · brightness " + s.brightness.toFixed(2) +
     " · offset " + s.offset.map(v => v.toFixed(1)).join(",");
 }, 2000);
 load();
@@ -195,12 +199,14 @@ def create_app(ctl):
                                  overrides)
         return _png(image, 4)
 
-    @app.get("/cards.json")
-    def cards_json():
+    @app.get("/slides.json")
+    def slides_json():
         return jsonify([
-            {"bus": c.bus, "title": c.title, "subtitle": c.subtitle,
-             "place": (c.place_variants or [""])[0], "remark": c.remark}
-            for c in ctl.cards()
+            {"kind": s.kind, "label": s.label,
+             "head": (s.head or [""])[0], "sub": s.sub,
+             "place": (s.place or [""])[0], "body": (s.body or [""])[0],
+             "foot": s.foot}
+            for s in ctl.all_slides()
         ])
 
     @app.get("/theme.json")

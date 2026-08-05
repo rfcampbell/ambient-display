@@ -12,6 +12,29 @@ from PIL import ImageFont
 # Font families we know how to find. Each style maps to candidate paths tried
 # in order. Missing styles fall back to "regular".
 FAMILIES = {
+    # Sans with a tall x-height and open apertures. At 128px serif stems and
+    # bracketed serifs land on half a pixel and break up; these don't.
+    "Inter": {
+        "thin": ["/usr/share/fonts/opentype/inter/Inter-Thin.otf"],
+        "extralight": ["/usr/share/fonts/opentype/inter/Inter-ExtraLight.otf"],
+        "light": ["/usr/share/fonts/opentype/inter/Inter-Light.otf"],
+        "regular": ["/usr/share/fonts/opentype/inter/Inter-Regular.otf"],
+        "medium": ["/usr/share/fonts/opentype/inter/Inter-Medium.otf"],
+        "semibold": ["/usr/share/fonts/opentype/inter/Inter-SemiBold.otf"],
+        "bold": ["/usr/share/fonts/opentype/inter/Inter-Bold.otf"],
+        "extrabold": ["/usr/share/fonts/opentype/inter/Inter-ExtraBold.otf"],
+        "black": ["/usr/share/fonts/opentype/inter/Inter-Black.otf"],
+    },
+    "IBM Plex Sans": {
+        "thin": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-Thin.ttf"],
+        "extralight": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-ExtraLight.ttf"],
+        "light": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-Light.ttf"],
+        "regular": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-Regular.ttf"],
+        "text": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-Text.ttf"],
+        "medium": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-Medium.ttf"],
+        "semibold": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-SemiBold.ttf"],
+        "bold": ["/usr/share/fonts/truetype/ibm-plex/IBMPlexSans-Bold.ttf"],
+    },
     "Noto Serif": {
         "regular": ["/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf"],
         "italic": ["/usr/share/fonts/truetype/noto/NotoSerif-Italic.ttf"],
@@ -53,13 +76,16 @@ FONT_DIRS = [
 ]
 
 DEFAULTS = {
-    # Family and per-role style. A role may also name a .ttf path directly.
-    "family": "Noto Serif",
-    "head_font": "regular",
-    "sci_font": "italic",
+    # Family and per-role weight. A role may also name a font file directly.
+    # There are no italics anywhere: at 9-11px a sloped sans is mush, so
+    # weight does the work instead.
+    "family": "Inter",
+    "head_font": "semibold",
+    "sub_font": "medium",
     "place_font": "regular",
-    "remark_font": "italic",
-    "bus_font": "regular",
+    "body_font": "regular",
+    "foot_font": "regular",
+    "label_font": "semibold",
 
     # Frame. Keep margins >= burnin amplitude + 2 so nothing clips when shifted.
     "margin_x": 9,
@@ -67,69 +93,86 @@ DEFAULTS = {
     "vertical_bias": 0.40,   # 0 = stack hugs top, 1 = hugs bottom
 
     # Headline autofits: largest of these that wraps into head_max_lines wins.
-    "head_sizes": [22, 20, 18, 16, 14, 12],
+    "head_sizes": [24, 22, 20, 18, 16, 14, 12],
     "head_max_lines": 3,
-    "head_leading": 1.04,
+    "head_leading": 1.06,
+    # A more specific headline wins only while it still sets this big; below
+    # it, a shorter, blunter variant is the better placard.
+    "head_min_size": 16,
 
-    "sci_size": 10,
-    "sci_leading": 1.12,
-    "sci_max_lines": 2,
+    "sub_size": 11,
+    "sub_leading": 1.14,
+    "sub_max_lines": 2,
 
-    "place_size": 10,
+    "place_size": 11,
     "place_leading": 1.18,
     "place_max_lines": 2,
 
-    "remark_size": 9,
-    "remark_leading": 1.22,
-    "remark_max_lines": 3,
+    # The habitat slide gives the remark the whole card, so it can be big.
+    "body_sizes": [15, 14, 13, 12, 11, 10],
+    "body_max_lines": 6,
+    "body_leading": 1.22,
 
-    "bus_size": 7,
-    "bus_tracking": 1.6,
-    "show_bus": True,
+    "foot_size": 9,
 
-    # Vertical gaps between blocks. Squeezed proportionally if the card is full.
-    "gap_bus_head": 9,
-    "gap_head_sci": 3,
-    "gap_sci_rule": 7,
-    "gap_rule_place": 7,
-    "gap_place_remark": 4,
-
+    # The letterspaced small-caps label and the hairline rule are what carry
+    # the placard character now that the type is a sans.
+    "label_size": 8,
+    "label_tracking": 1.7,
+    "show_label": True,
     "rule_width": 22,
     "show_rule": True,
 
-    # Dim, warm ink on black. Nothing here should approach 255.
-    #
-    # The headline is 22px and the body is 9-10px, so size already carries the
-    # hierarchy -- the small text doesn't need to be much darker to read as
-    # secondary, and at this size it can't afford to be. The secondary tiers
-    # sit close under the headline; the rule and the bus label stay quiet.
-    "ink_head": "#b8ac90",
-    "ink_sci": "#9c9280",
-    "ink_rule": "#544c40",
-    "ink_place": "#a89e88",
-    "ink_remark": "#8e8574",
-    "ink_bus": "#847a68",
-    "max_channel": 200,
+    "map_height": 78,
+
+    # Vertical gaps between blocks. Squeezed proportionally if a card is full.
+    "gap_label_head": 9,
+    "gap_head_sub": 3,
+    "gap_sub_rule": 7,
+    "gap_rule_place": 7,
+    "gap_place_foot": 5,
+    "gap_label_body": 9,
+    "gap_body_foot": 7,
+    "gap_label_map": 5,
+    "gap_map_foot": 5,
+
+    # Dim, warm ink on black. Nothing here should approach 255 -- the cap
+    # leaves deliberate headroom, because this is judged on a monitor and the
+    # OLED will read brighter in a dark room.
+    "ink_head": "#ccc0a4",
+    "ink_sub": "#b0a68e",
+    "ink_place": "#bcb29a",
+    "ink_body": "#b6ac94",
+    "ink_foot": "#948b78",
+    "ink_label": "#9a9080",
+    "ink_rule": "#6a6152",
+    "ink_coast": "#7d7464",
+    "ink_dot": "#d8cbac",
+    "max_channel": 225,
 }
 
 # Keys whose values are numbers, for coercing preview query overrides.
 _INT_KEYS = {
-    "margin_x", "margin_y", "head_max_lines", "sci_size", "sci_max_lines",
-    "place_size", "place_max_lines", "remark_size", "remark_max_lines",
-    "bus_size", "gap_bus_head", "gap_head_sci", "gap_sci_rule",
-    "gap_rule_place", "gap_place_remark", "rule_width", "max_channel",
+    "margin_x", "margin_y", "head_max_lines", "sub_size", "sub_max_lines",
+    "place_size", "place_max_lines", "body_max_lines", "foot_size",
+    "label_size", "rule_width", "map_height", "max_channel", "head_min_size",
+    "gap_label_head", "gap_head_sub", "gap_sub_rule", "gap_rule_place",
+    "gap_place_foot", "gap_label_body", "gap_body_foot", "gap_label_map",
+    "gap_map_foot",
 }
 _FLOAT_KEYS = {
-    "vertical_bias", "head_leading", "sci_leading", "place_leading",
-    "remark_leading", "bus_tracking",
+    "vertical_bias", "head_leading", "sub_leading", "place_leading",
+    "body_leading", "label_tracking",
 }
-_BOOL_KEYS = {"show_bus", "show_rule"}
+_BOOL_KEYS = {"show_label", "show_rule"}
+_LIST_KEYS = {"head_sizes", "body_sizes"}
 
 
 def merged(overrides=None):
     """Theme defaults with overrides applied."""
     t = dict(DEFAULTS)
-    t["head_sizes"] = list(DEFAULTS["head_sizes"])
+    for key in _LIST_KEYS:
+        t[key] = list(DEFAULTS[key])
     if overrides:
         t.update(overrides)
     return t
@@ -137,7 +180,7 @@ def merged(overrides=None):
 
 def coerce(key, value):
     """Coerce a string (from a query param) to the type the theme key wants."""
-    if key == "head_sizes":
+    if key in _LIST_KEYS:
         return [int(v) for v in str(value).replace(",", " ").split()]
     if key in _INT_KEYS:
         return int(float(value))

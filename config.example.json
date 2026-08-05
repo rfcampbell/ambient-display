@@ -29,7 +29,12 @@
     "emulator": { "transform": "none", "scale": 4 }
   },
 
-  "rotation": { "hold_seconds": 45, "fade_seconds": 6 },
+  "rotation": {
+    "slide_hold_seconds": 75,
+    "slide_hold_jitter": 15,
+    "slide_fade_seconds": 8,
+    "feature_min_dwell_seconds": 300
+  },
 
   "burnin": { "amplitude": 3, "interval_seconds": 300, "ease_seconds": 20 },
 
@@ -44,32 +49,51 @@
 
   "content": {
     "known_only": true,
-    "subtitle_blocklist": ["Sonus naturalis"],
-    "remark_truncate": true
+    "place_label": "country",
+    "with_map": true
   },
 
   "preview": { "enabled": true, "host": "0.0.0.0", "port": 8324, "dev": true },
 
   "theme": {
-    "family": "Noto Serif",
-    "head_sizes": [22, 20, 18, 16, 14, 12],
+    "family": "Inter",
+    "head_font": "semibold",
+    "sub_font": "medium",
+    "place_font": "regular",
+    "body_font": "regular",
+    "label_font": "semibold",
+
+    "head_sizes": [24, 22, 20, 18, 16, 14, 12],
     "head_max_lines": 3,
-    "head_leading": 1.04,
-    "sci_size": 10,
-    "place_size": 10,
-    "remark_size": 9,
-    "remark_max_lines": 3,
-    "bus_size": 7,
-    "bus_tracking": 1.6,
+    "head_min_size": 16,
+    "head_leading": 1.06,
+
+    "sub_size": 11,
+    "place_size": 11,
+    "place_max_lines": 2,
+
+    "body_sizes": [15, 14, 13, 12, 11, 10],
+    "body_max_lines": 6,
+
+    "foot_size": 9,
+    "label_size": 8,
+    "label_tracking": 1.7,
+    "rule_width": 22,
+    "map_height": 78,
+
     "margin_x": 9,
     "margin_y": 7,
     "vertical_bias": 0.40,
-    "ink_head": "#b8ac90",
-    "ink_sci": "#9c9280",
-    "ink_place": "#a89e88",
-    "ink_remark": "#8e8574",
-    "ink_rule": "#544c40",
-    "ink_bus": "#847a68",
-    "max_channel": 200
+
+    "ink_head": "#ccc0a4",
+    "ink_sub": "#b0a68e",
+    "ink_place": "#bcb29a",
+    "ink_body": "#b6ac94",
+    "ink_foot": "#948b78",
+    "ink_label": "#9a9080",
+    "ink_rule": "#6a6152",
+    "ink_coast": "#7d7464",
+    "ink_dot": "#d8cbac",
+    "max_channel": 225
   }
 }

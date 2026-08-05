@@ -41,7 +41,15 @@ DEFAULTS = {
         "ssd1351": {"bgr": True},
         "emulator": {"transform": "none", "scale": 4},
     },
-    "rotation": {"hold_seconds": 45, "fade_seconds": 6},
+    # The placard stays on one recording and turns pages inside it. It only
+    # moves to another bus when that bus starts something newer, and not
+    # before min_dwell has passed, so it can't flit.
+    "rotation": {
+        "slide_hold_seconds": 75,
+        "slide_hold_jitter": 15,
+        "slide_fade_seconds": 8,
+        "feature_min_dwell_seconds": 300,
+    },
     "burnin": {"amplitude": 3, "interval_seconds": 300, "ease_seconds": 20},
     "schedule": {
         "enabled": True,
@@ -53,8 +61,10 @@ DEFAULTS = {
     },
     "content": {
         "known_only": True,
-        "subtitle_blocklist": ["Sonus naturalis"],
-        "remark_truncate": True,
+        # What the label says on a record whose headline is its place:
+        # "country" -> PERU, "locality" -> the literal field name.
+        "place_label": "country",
+        "with_map": True,
     },
     "preview": {"enabled": True, "host": "0.0.0.0", "port": 8324, "dev": True},
     "theme": {},
@@ -88,6 +98,4 @@ def load(path=None):
 
 def theme_of(cfg):
     """Full theme dict: theme defaults + the config's theme block."""
-    t = theme_mod.merged(cfg.get("theme"))
-    t["remark_truncate"] = cfg.get("content", {}).get("remark_truncate", True)
-    return t
+    return theme_mod.merged(cfg.get("theme"))
