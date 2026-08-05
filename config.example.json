@@ -1,0 +1,75 @@
+{
+  "mqtt": {
+    "host": "192.168.221.163",
+    "port": 1883,
+    "topic": "ambient/nowplaying",
+    "state_topic": "ambient/state",
+    "availability_topic": "ambient/availability",
+    "use_state": true,
+    "username": null,
+    "password": null,
+    "client_id": null
+  },
+
+  "display": {
+    "device": "noop",
+    "width": 128,
+    "height": 128,
+    "rotate": 0,
+    "fps": 12,
+    "brightness": 1.0,
+    "spi": {
+      "port": 0,
+      "device": 0,
+      "bus_speed_hz": 16000000,
+      "gpio_dc": 25,
+      "gpio_rst": 27
+    },
+    "ssd1351": { "bgr": true },
+    "emulator": { "transform": "none", "scale": 4 }
+  },
+
+  "rotation": { "hold_seconds": 45, "fade_seconds": 6 },
+
+  "burnin": { "amplitude": 3, "interval_seconds": 300, "ease_seconds": 20 },
+
+  "schedule": {
+    "enabled": true,
+    "wake": "07:00",
+    "evening": "20:00",
+    "sleep": "23:00",
+    "night_level": 0.55,
+    "fade_seconds": 180
+  },
+
+  "content": {
+    "known_only": true,
+    "subtitle_blocklist": ["Sonus naturalis"],
+    "remark_truncate": true
+  },
+
+  "preview": { "enabled": true, "host": "0.0.0.0", "port": 8324, "dev": true },
+
+  "theme": {
+    "family": "Noto Serif",
+    "head_sizes": [22, 20, 18, 16, 14, 12],
+    "head_max_lines": 3,
+    "head_leading": 1.04,
+    "sci_size": 10,
+    "place_size": 10,
+    "remark_size": 9,
+    "remark_max_lines": 3,
+    "bus_size": 7,
+    "bus_tracking": 1.6,
+    "margin_x": 9,
+    "margin_y": 7,
+    "vertical_bias": 0.40,
+    "ink_head": "#a89e84",
+    "ink_sci": "#6a6254",
+    "ink_place": "#78705e",
+    "ink_remark": "#565042",
+    "ink_rule": "#3a342a",
+    "ink_bus": "#4a4438",
+    "max_channel": 190
+  }
+}

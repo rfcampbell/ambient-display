@@ -1,0 +1,31 @@
+[Unit]
+Description=ambient-display placard client
+Documentation=https://github.com/rcampbell/ambient-display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rcampbell
+WorkingDirectory=/var/www/ambient-display
+ExecStart=/var/www/ambient-display/.venv/bin/python -m ambient_display
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+
+# SPI and the DC/RST pins.
+SupplementaryGroups=spi gpio
+
+# The panel should go dark on the way out, which the client does in its
+# shutdown path -- give it a moment.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/www/ambient-display
+
+[Install]
+WantedBy=multi-user.target

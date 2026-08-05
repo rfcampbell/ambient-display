@@ -1,0 +1,11 @@
+# Core
+pillow>=10
+paho-mqtt>=2.0
+flask>=3.0
+
+# Development panel (pulls in pygame). Not needed on Bloopy once the real
+# display is wired up, but harmless to keep installed.
+luma.emulator>=1.7
+
+# The real panel: SSD1351 over SPI. Only usable on the Pi.
+luma.oled>=3.13
