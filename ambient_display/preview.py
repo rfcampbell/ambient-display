@@ -27,7 +27,9 @@ PAGE = """<!doctype html>
               text-transform:uppercase; font-size:10px; }
  img { image-rendering:pixelated; display:block; background:#000;
        outline:1px solid #2a2a2a; }
- aside { min-width:340px; flex:1; }
+ aside { min-width:340px; flex:1 1 340px; }
+ #controls { display:grid; gap:0 26px;
+              grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); }
  label { display:flex; justify-content:space-between; gap:10px; padding:2px 0;
          align-items:center; }
  label span { color:#7d7666; }
@@ -138,18 +140,22 @@ async function load() {
   refreshStill();
 }
 document.getElementById("reload").onclick = load;
-setInterval(() => {
+function tickLive() {
   const t = Date.now();
   document.getElementById("live1").src = "/frame.png?t=" + t;
   document.getElementById("live4").src = "/frame@4x.png?t=" + t;
-}, 1000);
-setInterval(async () => {
+}
+tickLive();
+setInterval(tickLive, 1000);
+async function tickStatus() {
   const s = await (await fetch("/status.json")).json();
   document.getElementById("status").textContent =
     "mqtt " + (s.connected ? "connected" : "offline") + " · " + s.broker +
     " · " + s.records + " rec / " + s.slides + " slides · " + (s.slide||"-") + " · brightness " + s.brightness.toFixed(2) +
     " · offset " + s.offset.map(v => v.toFixed(1)).join(",");
-}, 2000);
+}
+tickStatus();
+setInterval(tickStatus, 2000);
 load();
 </script>
 """

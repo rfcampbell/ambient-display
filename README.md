@@ -266,28 +266,53 @@ Two things to check on first light, both config keys:
 
 `display.rotate` is 0–3 (90° steps) for whichever way the frame hangs.
 
-## Deploy on Bloopy
+## Deploy
+
+It runs on robix today, at <http://display.robix>, as a systemd **user**
+service — the same shape as ambient-mixer, and the same process Bloopy will
+run. On robix `display.device` stays `noop`: no panel, so the client
+subscribes, composes frames and serves the bench. That is the whole deploy
+except the last inch.
 
 ```sh
-sudo mkdir -p /var/www/ambient-display
-sudo chown rcampbell: /var/www/ambient-display
-rsync -a --exclude .venv --exclude .git ./ rcampbell@bloopy:/var/www/ambient-display/
+install -Dm644 deploy/ambient-display.service \
+    ~/.config/systemd/user/ambient-display.service
+systemctl --user daemon-reload
+systemctl --user enable --now ambient-display
+journalctl --user -u ambient-display -f
 
-ssh bloopy
-cd /var/www/ambient-display
-sudo apt install fonts-inter
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-sudo usermod -aG spi,gpio rcampbell
-
-sudo cp deploy/ambient-display.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ambient-display
-journalctl -u ambient-display -f
+sudo install -m644 deploy/ambient-display.nginx \
+    /etc/nginx/sites-available/display.robix
+sudo ln -s /etc/nginx/sites-available/display.robix /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-`deploy/nginx-ambient-display.conf` puts the preview on port 80, restricted
-to the LAN. It's a bench for tuning type from a laptop, not something to
-expose.
+A user service rather than a system one because that is how robix runs the
+mixer, and `loginctl enable-linger rcampbell` is already set, so it starts at
+boot with nobody logged in. It needs no privileges on robix, and on Bloopy it
+needs only group membership, which a user service inherits.
+
+### When Bloopy exists
+
+```sh
+rsync -a --exclude .venv --exclude .git ./ rcampbell@bloopy:~/ambient-display/
+ssh bloopy
+cd ~/ambient-display
+sudo apt install fonts-inter
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+sudo usermod -aG spi,gpio rcampbell     # log out and back in
+```
+
+Then the same two install blocks above, plus `"display": {"device":
+"ssd1351"}` in `config.json`. Either point `display.robix`'s `proxy_pass` at
+bloopy and keep the name, or install the vhost on Bloopy as `display.bloopy`.
+
+**The ssd1351 path has never executed** — there is no panel to execute it
+against. Everything ahead of it has: the subscriber, the featuring, the
+slides, the renderer, the drift and schedule curves, the preview, the
+service, the vhost. What is untested is the last call, `device.display(image)`
+onto real hardware, and the two config keys around it (`ssd1351.bgr`, the
+DC/RST pins).
 
 ## Layout
 

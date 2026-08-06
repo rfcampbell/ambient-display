@@ -1,31 +1,41 @@
+# systemd *user* service, matching ambient-mixer on robix.
+#
+# It runs the same process on both machines. On robix `display.device` stays
+# "noop": there is no panel here, so the client subscribes, composes frames and
+# serves the preview, which is exactly the deploy minus the last inch. On
+# Bloopy set `display.device` to "ssd1351" in config.json and add the user to
+# the spi and gpio groups -- a user service runs as that user and inherits the
+# groups, so the unit itself doesn't change.
+#
+# `loginctl enable-linger rcampbell` (already set on robix for the mixer)
+# starts it at boot with nobody logged in.
+#
+#   install -Dm644 deploy/ambient-display.service \
+#       ~/.config/systemd/user/ambient-display.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ambient-display
+#   journalctl --user -u ambient-display -f
+
 [Unit]
 Description=ambient-display placard client
-Documentation=https://github.com/rcampbell/ambient-display
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=rcampbell
-WorkingDirectory=/var/www/ambient-display
-ExecStart=/var/www/ambient-display/.venv/bin/python -m ambient_display
+WorkingDirectory=/home/rcampbell/ambient-display
+ExecStart=/home/rcampbell/ambient-display/.venv/bin/python -m ambient_display
 Environment=PYTHONUNBUFFERED=1
+
+# always, not on-failure. SIGTERM makes the client exit 0 -- it blanks the
+# panel and returns cleanly -- so a session teardown or a stray kill looks like
+# success, and on-failure would leave the frame dark until someone noticed.
 Restart=always
 RestartSec=5
 
-# SPI and the DC/RST pins.
-SupplementaryGroups=spi gpio
-
-# The panel should go dark on the way out, which the client does in its
-# shutdown path -- give it a moment.
+# The client blanks the panel on the way out; give it room to finish.
 KillSignal=SIGTERM
 TimeoutStopSec=10
 
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths=/var/www/ambient-display
-
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
