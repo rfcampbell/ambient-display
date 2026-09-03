@@ -251,11 +251,20 @@ Waveshare 1.5" RGB OLED (SSD1351, 128×128) on Bloopy, over SPI:
 | DIN | GPIO10 / MOSI |
 | CLK | GPIO11 / SCLK |
 | CS | GPIO8 / CE0 |
-| DC | GPIO25 |
-| RST | GPIO27 |
+| DC | GPIO24 |
+| RST | GPIO25 |
 
-Enable SPI (`sudo raspi-config` → Interface Options → SPI), then set
-`"display": { "device": "ssd1351" }`.
+That DC/RST pair is what is actually wired on pixelpup. It is *not* the
+default: `display.spi.gpio_dc` / `gpio_rst` default to 25/27 in `config.py`,
+which is what Waveshare's own examples use. pixelpup's `config.json`
+overrides them to 24/25. Confirm against your own wiring before believing
+either number.
+
+Enable SPI by uncommenting `dtparam=spi=on` in `/boot/firmware/config.txt`
+(`raspi-config` → Interface Options → SPI does the same thing), reboot, then
+set `"display": { "device": "ssd1351" }`. That one line is the *only* boot
+config the panel needs -- no overlay, no `gpio=` directives: DC and RST are
+plain GPIOs the luma driver drives itself.
 
 Two things to check on first light, both config keys:
 
@@ -292,27 +301,153 @@ mixer, and `loginctl enable-linger rcampbell` is already set, so it starts at
 boot with nobody logged in. It needs no privileges on robix, and on Bloopy it
 needs only group membership, which a user service inherits.
 
-### When Bloopy exists
+### Rebuilding the card from scratch
+
+The placard runs on **pixelpup**, a Pi Zero 2 W. Its setup once existed only
+on its SD card, and when a power cut corrupted that card the whole
+arrangement went with it. This section is the replacement for that: enough to
+go from a freshly flashed card to a lit panel without remembering anything.
+
+Starting point: Raspberry Pi OS Lite 64-bit (Debian 13, trixie) flashed with
+hostname `pixelpup`, user `rcampbell`, wifi and ssh configured by the imager.
+Nothing else installed.
+
+**1. Packages and SPI.** The only steps that need root.
 
 ```sh
-rsync -a --exclude .venv --exclude .git ./ rcampbell@bloopy:~/ambient-display/
-ssh bloopy
-cd ~/ambient-display
-sudo apt install fonts-inter
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-sudo usermod -aG spi,gpio rcampbell     # log out and back in
+sudo apt update
+sudo apt install -y git fonts-inter
+sudo cp /boot/firmware/config.txt /boot/firmware/config.txt.stock
+sudo sed -i 's/^#dtparam=spi=on$/dtparam=spi=on/' /boot/firmware/config.txt
 ```
 
-Then the same two install blocks above, plus `"display": {"device":
-"ssd1351"}` in `config.json`. Either point `display.robix`'s `proxy_pass` at
-bloopy and keep the name, or install the vhost on Bloopy as `display.bloopy`.
+`dtparam=spi=on` is the single line that separates a stock config.txt from a
+working one -- verified by diffing a stock image against the card's own
+backup, which differed by that line and nothing else. `fonts-inter` is not
+optional: `theme.py` resolves `/usr/share/fonts/opentype/inter/Inter-*.otf`
+by absolute path, and a Lite image ships no fonts at all.
 
-**The ssd1351 path has never executed** — there is no panel to execute it
-against. Everything ahead of it has: the subscriber, the featuring, the
-slides, the renderer, the drift and schedule curves, the preview, the
-service, the vhost. What is untested is the last call, `device.display(image)`
-onto real hardware, and the two config keys around it (`ssd1351.bgr`, the
-DC/RST pins).
+**2. The code.**
+
+```sh
+git clone https://github.com/rfcampbell/ambient-display.git ~/ambient-display
+cd ~/ambient-display
+```
+
+**3. The venv.** The `--system-site-packages` flag is load-bearing, not
+tidiness:
+
+```sh
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install "pillow>=10" "paho-mqtt>=2.0" "flask>=3.0" "luma.oled>=3.13"
+```
+
+`luma.oled` imports `RPi.GPIO`. Raspberry Pi OS trixie no longer ships the
+classic RPi.GPIO -- it ships `python3-rpi-lgpio`, an apt package that
+re-implements the RPi.GPIO API on top of lgpio, and that is the supported
+path on current kernels. It is an apt package, so a sealed venv cannot see
+it, and `pip install RPi.GPIO` is the wrong fix: it installs the old library
+that does not drive these kernels. Hence a venv that can see system packages.
+
+`requirements.txt` is deliberately *not* used here. It lists `luma.emulator`,
+which drags in pygame for the development panel; the comment there already
+says it is not needed once the real display is wired up, and on a 512 MB Zero
+2 W it is worth the omission. The four packages above are what the panel
+path actually imports.
+
+**4. `config.json`.** Gitignored, so it is exactly the piece that lived only
+on the lost card. Everything not named here comes from the defaults in
+`config.py`.
+
+```json
+{
+  "mqtt": {
+    "host": "192.168.221.163",
+    "port": 1883,
+    "topic": "ambient/jungler/nowplaying",
+    "state_topic": "ambient/jungler/state",
+    "availability_topic": "ambient/jungler/availability",
+    "use_state": true
+  },
+
+  "display": {
+    "device": "ssd1351",
+    "width": 128,
+    "height": 128,
+    "rotate": 0,
+    "spi": {
+      "port": 0,
+      "device": 0,
+      "bus_speed_hz": 8000000,
+      "gpio_dc": 24,
+      "gpio_rst": 25
+    }
+  }
+}
+```
+
+**5. Groups.** A stock Raspberry Pi OS image already puts the first user in
+`spi` and `gpio`, so the `usermod` this section used to prescribe is usually
+a no-op. Check rather than assume: `id | tr ' ' '\n' | grep -E 'spi|gpio'`.
+
+**6. The service.**
+
+```sh
+install -Dm644 deploy/ambient-display.service \
+    ~/.config/systemd/user/ambient-display.service
+loginctl enable-linger rcampbell
+systemctl --user daemon-reload
+systemctl --user enable --now ambient-display
+```
+
+`enable-linger` is what makes a *user* service start at boot with nobody
+logged in; without it the placard only runs while someone is ssh'd in. It
+does not need sudo -- polkit lets a user linger themselves.
+
+**7. Reboot**, both to pick up `dtparam=spi=on` and because a placard that
+has not survived a reboot is not yet deployed.
+
+```sh
+sudo reboot
+# then, once it is back:
+ls -l /dev/spidev0.0                       # the SPI device now exists
+systemctl --user status ambient-display    # active, and not restart-looping
+journalctl --user -u ambient-display -b    # this boot only
+```
+
+The nginx vhost is robix-only. It proxies the typography bench, which is a
+tuning tool, not part of the placard; pixelpup serves the same bench directly
+on `:8324` if you want it.
+
+### Coming back from a power cut
+
+The failure that cost the card was a power cut, so this was looked at
+deliberately rather than assumed. What is actually true today:
+
+- **Wifi reassociates on its own.** NetworkManager owns `wlan0` via a
+  netplan-generated connection with `autoconnect=yes` and powersave at the
+  default `0`. Nothing needs adding.
+- **The client tolerates starting before the network is up**, which matters
+  because it will. `feed.py` uses `connect_async` + `loop_start` with
+  `reconnect_delay_set(1, 60)`, so a broker that is not there yet is a retry
+  with backoff, not a crash.
+- **`After=network-online.target` in the unit is a no-op** and should not be
+  trusted. That target does not exist in the *user* systemd manager
+  (`systemctl --user show network-online.target` reports
+  `LoadState=not-found`). It is harmless only because of the previous point.
+  If the client ever grows a hard requirement on the network at startup, this
+  is the line that will not save it.
+- **`nowplaying` is retained on the broker**, so a cold boot draws real
+  content immediately instead of waiting for the mixer's next publish.
+- **`Restart=always` with `RestartSec=5`** covers the remaining cases.
+
+No watchdog is configured, and none was added. `/dev/watchdog` exists and
+`systemd`'s `RuntimeWatchdogSec` is off. A watchdog reboots a *hung* board,
+which is not what happened here -- the card's filesystem was corrupted by
+losing power mid-write, and a watchdog neither prevents nor detects that. If
+this card dies the same way again, the things that would actually help are a
+better-quality card, or moving the root filesystem to read-only or USB. Say
+the word and that can be a separate piece of work.
 
 ## Layout
 
