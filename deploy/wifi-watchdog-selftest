@@ -1,0 +1,64 @@
+#!/bin/bash
+# Verify that the nmcli calls the watchdog's recovery path depends on are real
+# subcommands -- at install time, on the box, before anything needs them.
+#
+# This exists because `nmcli device reconnect` is not a command. nmcli rejects
+# it with exit 2 without touching the device, so the watchdog detected every
+# failure correctly, logged "bouncing wlan0", recovered nothing, and said
+# nothing that looked wrong. Detection and recovery are separate things and
+# need separate tests: every earlier check proved the counter, none of them
+# ever proved the bounce.
+#
+# It reads the verbs out of the watchdog script rather than hardcoding them,
+# so changing the recovery call re-tests the new call and not this comment.
+#
+#   wifi-watchdog-selftest [path-to-wifi-watchdog]
+#
+# Exit 0 = every nmcli call the script makes exists. Non-zero = it does not,
+# and the watchdog cannot recover from anything.
+
+set -u
+
+SCRIPT=${1:-/usr/local/sbin/wifi-watchdog}
+# A device name that cannot exist: a valid verb fails with "not found" (exit
+# 10), an invalid verb fails with "not understood" (exit 2). Nothing real is
+# disconnected either way.
+PROBE=wdselftest-nodev
+rc=0
+
+[ -r "$SCRIPT" ] || { echo "FAIL: cannot read $SCRIPT"; exit 1; }
+command -v nmcli >/dev/null || { echo "FAIL: nmcli not installed"; exit 1; }
+
+# Strip comments and echo arguments first: the cautionary tale above and the
+# log lines both name these verbs in prose, and only executed calls count.
+verbs=$(sed 's/#.*//; s/\becho\b.*//' "$SCRIPT" \
+        | grep -oE '\bnmcli\b[^;&|]*\bdevice[[:space:]]+[a-z][a-z-]*' \
+        | awk '{print $NF}' | sort -u)
+
+[ -n "$verbs" ] && echo "checking nmcli device verbs used by $SCRIPT: $(echo $verbs)"
+
+for v in $verbs; do
+    out=$(nmcli -w 1 device "$v" "$PROBE" 2>&1); e=$?
+    if [ "$e" -eq 2 ] || printf '%s' "$out" | grep -q "not understood"; then
+        echo "FAIL: 'nmcli device $v' is not an nmcli subcommand (exit $e)"
+        echo "      $(printf '%s' "$out" | head -1)"
+        echo "      The watchdog would log a bounce here and do nothing."
+        rc=1
+    else
+        echo "ok:   'nmcli device $v' exists (exit $e against a nonexistent device)"
+    fi
+done
+
+# The profile lookup the bounce uses to explain itself when no wifi profile
+# exists. Read-only.
+if sed 's/#.*//; s/\becho\b.*//' "$SCRIPT" | grep -qE '\bnmcli\b.*\bcon(nection)?\b.*\bshow\b'; then
+    if nmcli -t -f TYPE con show >/dev/null 2>&1; then
+        echo "ok:   'nmcli con show' exists"
+    else
+        echo "FAIL: 'nmcli con show' failed"
+        rc=1
+    fi
+fi
+
+[ "$rc" -eq 0 ] && echo "PASS: recovery path calls exist" || echo "FAILED"
+exit "$rc"

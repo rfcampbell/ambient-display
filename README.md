@@ -513,6 +513,26 @@ The second case is the one that matters: a disconnected device with no default
 route at all is the shape the power cut left, and it is the case a blocked-ICMP
 test alone would not have exercised.
 
+`deploy/wifi-watchdog-selftest` now guards the specific mistake. It reads the
+nmcli verbs out of the watchdog script -- so changing the recovery call
+re-tests the new call -- and probes each one against a device name that cannot
+exist. A real verb comes back `Device not found` (exit 10); a verb that does
+not exist comes back `not understood` (exit 2), which is the failure, reported
+as one. Nothing is disconnected to find out. It is deliberately not a test of
+the whole watchdog: the counter was never the part that was broken.
+
+```
+$ wifi-watchdog-selftest
+ok:   'nmcli device connect' exists (exit 10 against a nonexistent device)
+ok:   'nmcli device disconnect' exists (exit 10 against a nonexistent device)
+PASS: recovery path calls exist
+```
+
+Run against a copy reverted to `reconnect`, it exits 1 with
+`FAIL: 'nmcli device reconnect' is not an nmcli subcommand`. That case was
+driven before trusting it -- a check nobody has watched fail is the thing this
+whole section is about.
+
 Where it stands as of 2026-09-03: **jungler** has the fixed script installed,
 enabled, fired, and both failure cases driven through it. **pixelpup** has not
 been done. Do not take that from this paragraph either -- run the three checks
@@ -525,6 +545,11 @@ sudo install -Dm755 deploy/wifi-watchdog /usr/local/sbin/wifi-watchdog
 sudo install -Dm644 deploy/wifi-watchdog.service /etc/systemd/system/wifi-watchdog.service
 sudo install -Dm644 deploy/wifi-watchdog.timer   /etc/systemd/system/wifi-watchdog.timer
 sudo install -Dm644 deploy/wifi-watchdog.default /etc/default/wifi-watchdog
+sudo install -Dm755 deploy/wifi-watchdog-selftest /usr/local/sbin/wifi-watchdog-selftest
+
+# Fail here rather than at 3am: check the recovery path's nmcli calls exist.
+sudo wifi-watchdog-selftest || echo "do not enable the timer until this passes"
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now wifi-watchdog.timer
 
