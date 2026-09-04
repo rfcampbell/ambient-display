@@ -1,0 +1,7 @@
+# Installed as /etc/default/wifi-watchdog. All optional.
+#
+# THRESHOLD consecutive failures at the timer's 1-minute interval is how long
+# the link may be dead before it is bounced -- 3 is about three minutes.
+#IFACE=wlan0
+#THRESHOLD=3
+#PING_WAIT=5

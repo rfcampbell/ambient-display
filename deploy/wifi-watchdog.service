@@ -1,0 +1,17 @@
+# System service, not a user one: nmcli needs root to reconnect a device, and
+# this has to run whether or not anyone is logged in.
+#
+#   sudo install -Dm755 deploy/wifi-watchdog /usr/local/sbin/wifi-watchdog
+#   sudo install -Dm644 deploy/wifi-watchdog.service /etc/systemd/system/wifi-watchdog.service
+#   sudo install -Dm644 deploy/wifi-watchdog.timer   /etc/systemd/system/wifi-watchdog.timer
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wifi-watchdog.timer
+
+[Unit]
+Description=Bounce the wifi when the gateway stops answering
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wifi-watchdog

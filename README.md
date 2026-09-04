@@ -321,6 +321,22 @@ sudo cp /boot/firmware/config.txt /boot/firmware/config.txt.stock
 sudo sed -i 's/^#dtparam=spi=on$/dtparam=spi=on/' /boot/firmware/config.txt
 ```
 
+Then check the *other* boot file while you are in there, because a fresh
+imager run is exactly when this gets set wrong:
+
+```sh
+grep -o 'cfg80211.ieee80211_regdom=[A-Z]*' /boot/firmware/cmdline.txt
+cat /sys/module/cfg80211/parameters/ieee80211_regdom   # what is actually in effect
+```
+
+It must be a real regulatory domain -- `US`, not `UM`. `UM` is the US Minor
+Outlying Islands, which has no entry in the regulatory database, so the
+kernel falls back to the world domain where every channel is
+passive-scan-only. The symptom is vicious: the radio sees every AP at full
+signal and can never transmit to associate, and it stays survivable for as
+long as the box never has to associate from scratch. See "Coming back from a
+power cut".
+
 `dtparam=spi=on` is the single line that separates a stock config.txt from a
 working one -- verified by diffing a stock image against the card's own
 backup, which differed by that line and nothing else. `fonts-inter` is not
@@ -448,6 +464,45 @@ losing power mid-write, and a watchdog neither prevents nor detects that. If
 this card dies the same way again, the things that would actually help are a
 better-quality card, or moving the root filesystem to read-only or USB. Say
 the word and that can be a separate piece of work.
+
+### The wifi watchdog
+
+`deploy/wifi-watchdog` pings the default gateway once a minute from a systemd
+timer and bounces the connection after three consecutive failures. It runs on
+both Pis -- pixelpup and jungler -- and this repo holds the canonical copy
+even though jungler runs the mixer rather than the placard.
+
+```sh
+sudo install -Dm755 deploy/wifi-watchdog /usr/local/sbin/wifi-watchdog
+sudo install -Dm644 deploy/wifi-watchdog.service /etc/systemd/system/wifi-watchdog.service
+sudo install -Dm644 deploy/wifi-watchdog.timer   /etc/systemd/system/wifi-watchdog.timer
+sudo install -Dm644 deploy/wifi-watchdog.default /etc/default/wifi-watchdog
+sudo systemctl daemon-reload
+sudo systemctl enable --now wifi-watchdog.timer
+
+systemctl status wifi-watchdog.timer
+journalctl -u wifi-watchdog -f
+```
+
+A system service, not a user one: `nmcli` needs root to reconnect a device,
+and this has to run with nobody logged in. It is a oneshot on a timer rather
+than a daemon so that a crash inside it cannot take the watchdog out
+permanently -- the next tick starts clean -- and the failure count lives in
+`/run`, so a reboot starts at zero.
+
+It pings whatever `ip route` currently calls the default gateway rather than
+a hardcoded address, because a watchdog aimed at a stale IP fails in the
+direction of reporting that everything is fine.
+
+What it cannot do is recreate a NetworkManager profile that has gone missing,
+which is half of what happened to jungler. When no wifi profile exists at all
+it says so in the journal instead of bouncing a device that has nothing to
+bounce to.
+
+The reason it exists is not that either original bug is likely to recur. It
+is that the failure was silent in the worst direction: the room kept playing
+while every alarm went dark, and it was found by noticing the placard had
+stopped changing.
 
 ## Layout
 

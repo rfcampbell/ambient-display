@@ -1,0 +1,75 @@
+#!/bin/bash
+# Ping the default gateway; bounce the wifi when it stops answering.
+#
+# Written after jungler sat unreachable for 3.5 hours with the room still
+# playing and every alarm dark. Two things had to go wrong together: a
+# regulatory-domain typo in cmdline.txt (`regdom=UM`, which has no database
+# entry, so the kernel fell back to world domain and every channel became
+# passive-scan-only -- the radio could see APs at full signal and never
+# transmit to associate), and the loss of the NetworkManager profile to a
+# power cut, which forced it to associate from scratch for the first time.
+# The typo had been survivable for as long as it never had to re-associate.
+#
+# The point of this script is not that either bug recurs. It is that the
+# failure was silent: nothing on the box was watching the one thing that
+# mattered.
+#
+# Runs as a oneshot from a timer, so a crash in here cannot take the watchdog
+# out permanently -- the next tick starts clean. The consecutive-failure count
+# lives in /run, which is tmpfs, so a reboot starts it at zero.
+
+set -u
+
+CONF=/etc/default/wifi-watchdog
+[ -r "$CONF" ] && . "$CONF"
+
+IFACE=${IFACE:-wlan0}
+THRESHOLD=${THRESHOLD:-3}
+PING_WAIT=${PING_WAIT:-5}
+STATE=${STATE:-/run/wifi-watchdog.$IFACE}
+
+# The gateway is whatever the routing table says right now, not a baked-in
+# address: a watchdog pinging a hardcoded IP starts lying the day the subnet
+# changes, and lies in the direction of "everything is fine".
+gw=$(ip route show default dev "$IFACE" 2>/dev/null | awk '{print $3; exit}')
+
+read_fails() {
+    local n
+    n=$(cat "$STATE" 2>/dev/null || echo 0)
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    echo "$n"
+}
+
+if [ -n "$gw" ] && ping -c1 -W "$PING_WAIT" -I "$IFACE" "$gw" >/dev/null 2>&1; then
+    prev=$(read_fails)
+    [ "$prev" -gt 0 ] && echo "gateway $gw answering again after $prev failure(s)"
+    echo 0 > "$STATE"
+    exit 0
+fi
+
+fails=$(( $(read_fails) + 1 ))
+echo "$fails" > "$STATE"
+echo "gateway ${gw:-<no default route>} unreachable via $IFACE ($fails/$THRESHOLD)"
+
+[ "$fails" -lt "$THRESHOLD" ] && exit 0
+
+# A bounce reconnects an existing profile. It cannot conjure one, and losing
+# the profile outright is exactly what the power cut did to jungler. Without
+# this line the watchdog would retry forever and log nothing that explains
+# why the retry can never work.
+if ! nmcli -t -f TYPE con show 2>/dev/null | grep -qx "802-11-wireless"; then
+    echo "ERROR: no wifi profile exists on this host -- a bounce cannot fix that." \
+         "Recreate it (nmcli con add ... / netplan apply)."
+fi
+
+echo "bouncing $IFACE after $fails consecutive failures"
+if nmcli device reconnect "$IFACE" >/dev/null 2>&1; then
+    echo "nmcli device reconnect $IFACE: ok"
+else
+    echo "nmcli device reconnect $IFACE: failed"
+fi
+
+# Restart the count rather than bouncing again on the next tick: the radio
+# needs seconds to associate, and a bounce-per-tick loop would stop it ever
+# getting there.
+echo 0 > "$STATE"

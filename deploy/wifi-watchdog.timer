@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the wifi watchdog every minute
+
+[Timer]
+# Let NetworkManager associate normally after a boot before the watchdog
+# starts forming opinions about it.
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=wifi-watchdog.service
+
+[Install]
+WantedBy=timers.target
