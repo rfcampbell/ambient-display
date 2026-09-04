@@ -14,4 +14,7 @@ Wants=NetworkManager.service
 
 [Service]
 Type=oneshot
+# A bounce is disconnect + connect with nmcli waiting up to 30s each; the
+# default 90s start timeout could kill it mid-associate.
+TimeoutStartSec=120
 ExecStart=/usr/local/sbin/wifi-watchdog

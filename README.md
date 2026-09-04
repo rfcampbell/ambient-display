@@ -21,9 +21,13 @@ Dim warm type on black, in a walnut frame. Nothing on it ever snaps.
 
 ## Status
 
-The panel (Waveshare SSD1351) hasn't arrived. Everything runs today against
-`luma.emulator` or headless with just the web preview; swapping to the real
-hardware is one config key. See [Hardware](#hardware).
+Running on pixelpup. The Waveshare SSD1351 is installed and lit: 128×128 over
+SPI, DC on GPIO24 and RST on GPIO25 -- not the 25/27 the driver defaults to.
+See [Hardware](#hardware) for the rest of the wiring.
+
+The `luma.emulator` and headless web-preview paths are still here, and still
+the way to work on slides without a panel in front of you. They are not what
+runs on pixelpup.
 
 ## Install
 
@@ -468,9 +472,53 @@ the word and that can be a separate piece of work.
 ### The wifi watchdog
 
 `deploy/wifi-watchdog` pings the default gateway once a minute from a systemd
-timer and bounces the connection after three consecutive failures. It runs on
-both Pis -- pixelpup and jungler -- and this repo holds the canonical copy
+timer and bounces the connection after three consecutive failures. It belongs
+on both Pis -- pixelpup and jungler -- and this repo holds the canonical copy
 even though jungler runs the mixer rather than the placard.
+
+**Installing it is a separate act from writing it.** The commit that added
+this script (`da653f3`) said it ran on both Pis. It ran on neither: the files
+were committed and the install block below was never executed, so for the
+whole of 2026-09-03 there was no timer, no unit and no journal line on either
+host. It was found by checking the Pis rather than the repo:
+`systemctl is-enabled wifi-watchdog.timer` returned `not-found` on both.
+Nothing in this file could have told you, because a README records what
+someone meant to do. Before believing this section, read the target:
+
+```sh
+systemctl is-enabled wifi-watchdog.timer   # enabled, not not-found
+systemctl show wifi-watchdog.timer -p LastTriggerUSec   # non-empty
+journalctl -u wifi-watchdog | tail         # it has actually run
+```
+
+**And the recovery path was broken.** As first written the bounce called
+`nmcli device reconnect`, which is not a command: nmcli takes `connect` and
+`disconnect`, and rejects `reconnect` with exit 2 *without touching the
+device*. So the watchdog counted to three, logged `bouncing wlan0`, called
+nothing, logged `failed`, reset its counter and repeated -- detection with no
+recovery, which against the outage that prompted it would have changed
+nothing. It now does `nmcli -w 30 device disconnect` then
+`nmcli -w 30 device connect`; the unit allows 120s because nmcli's default
+90s wait races the oneshot's start timeout.
+
+Both were found by driving it against deliberate failures on jungler
+(2026-09-03) rather than by reading it:
+
+| case | how | result |
+| --- | --- | --- |
+| gateway unreachable, link up | `ip route add blackhole $gw` | counted 1/3, 2/3, 3/3 and bounced on schedule; `nmcli device reconnect wlan0: failed`, NetworkManager logged no state change. This is what exposed the bug. |
+| device disconnected | `nmcli device disconnect wlan0` | down 20:50:34, `<no default route>` counted 1/3-3/3, `nmcli device connect wlan0: ok` at 20:53:05, reachable 20:53:16 -- 2m31s, the watchdog's own doing. An independent 10-minute fallback was armed and never fired. |
+
+The second case is the one that matters: a disconnected device with no default
+route at all is the shape the power cut left, and it is the case a blocked-ICMP
+test alone would not have exercised.
+
+Where it stands as of 2026-09-03: **jungler** has the fixed script installed,
+enabled, fired, and both failure cases driven through it. **pixelpup** has not
+been done. Do not take that from this paragraph either -- run the three checks
+above on the host itself.
+
+The install, which has to be run on each Pi:
 
 ```sh
 sudo install -Dm755 deploy/wifi-watchdog /usr/local/sbin/wifi-watchdog

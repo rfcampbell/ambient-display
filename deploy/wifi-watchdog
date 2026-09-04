@@ -62,11 +62,23 @@ if ! nmcli -t -f TYPE con show 2>/dev/null | grep -qx "802-11-wireless"; then
          "Recreate it (nmcli con add ... / netplan apply)."
 fi
 
+# There is no `nmcli device reconnect`. nmcli takes connect/disconnect and
+# rejects `reconnect` with exit 2 *without touching the device* -- so the
+# first version of this script counted to three, logged that it was bouncing,
+# and did nothing at all. Caught on 2026-09-03 by watching a real bounce fire
+# against a blackholed gateway: `nmcli device reconnect wlan0: failed`, and
+# NetworkManager logged no state change. Verified against nmcli 1.52.1.
+#
+# `-w 30` because nmcli otherwise waits up to 90s, which races this oneshot's
+# own start timeout; the unit allows 120s so a slow associate is not killed
+# halfway.
 echo "bouncing $IFACE after $fails consecutive failures"
-if nmcli device reconnect "$IFACE" >/dev/null 2>&1; then
-    echo "nmcli device reconnect $IFACE: ok"
+nmcli -w 30 device disconnect "$IFACE" >/dev/null 2>&1 \
+    || echo "nmcli device disconnect $IFACE: failed (continuing to connect)"
+if nmcli -w 30 device connect "$IFACE" >/dev/null 2>&1; then
+    echo "nmcli device connect $IFACE: ok"
 else
-    echo "nmcli device reconnect $IFACE: failed"
+    echo "nmcli device connect $IFACE: failed"
 fi
 
 # Restart the count rather than bouncing again on the next tick: the radio
