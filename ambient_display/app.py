@@ -48,6 +48,16 @@ class Display:
         self.frame = Image.new("RGB", self.size, (0, 0, 0))
         self.records = []
         self.brightness = 1.0
+        # Pins the panel at night_floor at any hour, for judging a candidate
+        # floor by eye. Runtime only: never written to config.json, and gone
+        # on restart, so a value left set by accident cannot outlive the
+        # session that set it.
+        self.night_hold = False
+        # True when there was nothing to draw. Published, because this is the
+        # one remaining way to reach a black panel that is not a deliberate
+        # setting, and it used to be indistinguishable from the night blank.
+        self.no_slides = False
+        self._warned_no_slides = False
         self.offset = (0.0, 0.0)
         self._featured = None
         self._cache = {}
@@ -134,15 +144,37 @@ class Display:
                 record, with_map=self.cfg["content"].get("with_map", True)), now)
 
         offset = self.drift.offset(now)
-        brightness = motion.brightness_at(wall or datetime.now(), self.cfg["schedule"])
-        brightness *= float(self.cfg["display"].get("brightness", 1.0))
+        if self.night_hold:
+            # The bench knob. Pins the panel at the floor at any hour so a
+            # candidate value can be judged by eye in a dark room instead of
+            # read off a curve. Ephemeral -- see preview.night_floor.
+            brightness = max(0.0, min(1.0, float(
+                self.cfg["schedule"].get("night_floor", 0.10))))
+        else:
+            brightness = motion.final_brightness(wall or datetime.now(), self.cfg)
 
         outgoing, incoming, alpha = self.show.tick(now)
 
-        if brightness <= 0.0 or incoming is None:
-            # Overnight: push true black rather than a dimmed placard.
+        # THESE TWO WERE ONE BRANCH AND THEY ARE NOT THE SAME EVENT. Fused,
+        # "the schedule says night" and "there is nothing to draw" produced an
+        # identical black frame and neither was reported. The first is now
+        # floored so it cannot reach black at all; the second still can --
+        # there is genuinely nothing to render -- but it says so, because a
+        # blank panel that nobody can explain is the whole fault this work
+        # exists to end.
+        self.no_slides = incoming is None
+        if incoming is None:
+            if not self._warned_no_slides:
+                log.warning("no slide to render -- panel will be blank; "
+                            "records=%d", len(records))
+                self._warned_no_slides = True
+            image = Image.new("RGB", self.size, (0, 0, 0))
+        elif brightness <= 0.0:
+            # Only reachable when the floor has been switched off on purpose
+            # (night_floor: 0, or schedule.enabled: false with a 0 trim).
             image = Image.new("RGB", self.size, (0, 0, 0))
         else:
+            self._warned_no_slides = False
             image = self._render(incoming, offset)
             if outgoing is not None and alpha < 1.0:
                 image = render.blend(self._render(outgoing, offset), image, alpha)
@@ -159,6 +191,10 @@ class Display:
         s = self.feed.status()
         with self.lock:
             s.update({"brightness": round(self.brightness, 3),
+                      "night_floor": round(float(
+                          self.cfg["schedule"].get("night_floor", 0.10)), 3),
+                      "night_hold": self.night_hold,
+                      "no_slides": self.no_slides,
                       "offset": [round(v, 2) for v in self.offset],
                       "records": len(self.records)})
         showing = self.show.current()

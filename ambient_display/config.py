@@ -57,6 +57,12 @@ DEFAULTS = {
         "evening": "20:00",
         "sleep": "23:00",
         "night_level": 0.55,
+        # The panel rests here overnight instead of going to true black. 0.10
+        # is the lowest value at which every ink in the palette still renders
+        # on all three channels once the SSD1351 has truncated to RGB565 --
+        # below it the blue drops out and the placard shifts green, and by
+        # 0.02 whole inks quantise away to nothing. Set 0 for true black.
+        "night_floor": 0.10,
         "fade_seconds": 180,
     },
     "content": {

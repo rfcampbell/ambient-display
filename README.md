@@ -34,7 +34,10 @@ entities by discovery -- see [Saying it is
 unhealthy](#saying-it-is-unhealthy). Before 2026-09-07 it had no way to say
 anything at all: a dark panel could mean the process had died, the Pi had
 hung, or nothing was arriving from the mixer, and all of them looked the same
-from the room. **journald on pixelpup is persistent as of the same date**, so
+from the room -- as did the fifth case, which is the panel being **correctly**
+black overnight. That fifth case is the likeliest explanation of the incident
+that prompted this work; see [The dark panel of 2026-09-07 was probably never
+a fault](#the-dark-panel-of-2026-09-07-was-probably-never-a-fault). **journald on pixelpup is persistent as of the same date**, so
 the logs from a failing run survive the reboot that fixes it.
 
 ## Install
@@ -202,15 +205,87 @@ keep showing it after you turn it off. Four things, all on from the start:
   bright panel keeps the antialiasing ramp intact, where turning the panel
   down would crush it. The cap leaves deliberate headroom, because this was
   judged on a monitor and the OLED will read brighter in a dark room.
-- **Overnight blank.** Full through the day, easing down from `evening`,
-  reaching `night_level` at `sleep`, then fading to true black over three
-  minutes and staying there until `wake`. Not a dimmed placard overnight —
-  black.
+- **Overnight floor.** Full through the day, easing down from `evening`,
+  reaching `night_level` at `sleep`, then fading over three minutes to
+  `night_floor` and resting there until `wake`. It went to *true black* until
+  2026-09-07, which was a mistake: a dark panel and a dead panel are the same
+  photograph, and telling them apart cost a morning. The floor is small enough
+  that the drift still does the burn-in work — nothing is held in one place
+  overnight, exactly as by day — and 0.10 of an already-low palette does not
+  light the room. `night_floor: 0` restores the old behaviour, as a choice
+  someone made rather than a default nobody picked.
 - **Slide rotation.** The page turns every 60–90s and the whole layout
   changes shape between the three kinds, so no glyph sits on a pixel for long.
 
 The frame is only pushed to the panel when the pixels actually changed, so a
 static placard costs nothing on the SPI bus.
+
+### Choosing the night floor
+
+The lower bound is not a matter of taste. The SSD1351 takes RGB565 — red and
+blue keep five bits, green six — so below a certain multiplier the channels
+truncate to zero one at a time and the placard stops being the colour it is
+supposed to be. Against the actual palette, where the dimmest ink is
+`ink_rule` `#6a6152`:
+
+| floor | ink_head | ink_foot | ink_rule | ink_dot | |
+|---|---|---|---|---|---|
+| 0.02 | 0/1/0 | **black** | **black** | 0/1/0 | inks vanish; what is left is green-only |
+| 0.04 | 1/2/0 | 0/1/0 | 0/1/0 | 1/2/0 | blue gone everywhere — warm cream reads green |
+| 0.06 | 1/3/1 | 1/2/0 | 0/1/0 | 1/3/1 | rule still losing blue |
+| 0.08 | 2/3/1 | 1/2/1 | 1/2/0 | 2/4/1 | only the rule is short a channel |
+| **0.10** | 2/4/2 | 1/3/1 | 1/2/1 | 2/5/2 | **first floor where every ink keeps all three** |
+| 0.14 | 3/6/2 | 2/4/2 | 1/3/1 | 3/7/3 | headroom |
+
+So **0.10** is the default: the lowest value at which the whole palette still
+renders in its own hue rather than shifting green. Below about 0.05 the
+placard is not dim, it is *discoloured*, which is a worse way to be alive.
+
+The upper bound is taste — whether it lights the room at 2am — and that is
+not answerable from a table. So it is adjustable at runtime, from a phone,
+standing in front of the panel:
+
+```sh
+curl 'http://pixelpup:8324/night-floor'                 # what is set now
+curl 'http://pixelpup:8324/night-floor?v=0.08&hold=1'   # try it, NOW, any hour
+curl 'http://pixelpup:8324/night-floor?v=0.14'          # try another
+curl 'http://pixelpup:8324/night-floor?hold=0'          # back to the schedule
+```
+
+`hold=1` pins the panel at the floor whatever the time, so a candidate can be
+judged in a dark room at 9pm instead of waiting for 23:03.
+
+**Nothing here is written to config.json.** A value tried at midnight and
+forgotten is gone at the next restart rather than quietly becoming the
+deployed setting — and `night_hold` especially would otherwise pin the panel
+dim through an entire day. Once a value has been chosen, put it in
+`config.json` by hand. Every change is logged, and the journal survives
+reboots now, so what was tried and when is answerable afterwards.
+
+### Everything else that can still produce a black panel
+
+A floor on the curve is only one of the ways there. An audit on 2026-09-07
+found three, and closing one of them would have left the same fault a layer
+along:
+
+| path | now |
+|---|---|
+| the schedule easing to 0.0 overnight | floored — cannot reach black unless `night_floor: 0` |
+| `display.brightness` as a multiplier: `0.0` there zeroes the product however well-behaved the curve is | clamped **after** the trim, in `motion.final_brightness` |
+| `incoming is None` in `Display.tick` — nothing to draw, at *any* hour | still blanks, but is now logged and published as `no_slides` |
+| the blank pushed on shutdown | kept: a deliberate stop should blank, and `laststop` says it was deliberate |
+
+The second is the one worth naming. **A floor that a config typo one line away
+can multiply back to zero is not a floor, it is a suggestion** — the same
+shape as a watchdog whose recovery call was wrong. So `final_brightness` is
+the single place that decides, and turning the panel genuinely off now has to
+be said out loud (`night_floor: 0`, or `schedule.enabled: false`) rather than
+arrived at by arithmetic.
+
+The third cannot be floored, because there is genuinely nothing to render. It
+used to share one `if` with the night blank, which is what made it invisible;
+it is now its own branch, it warns once to the journal, and it rides in the
+heartbeat.
 
 ## The web preview
 
@@ -553,14 +628,38 @@ room:
 | 1 | the process died, or is crash-looping | `..._stopped_badly` on, `..._stop_restarts` climbing |
 | 2 | the Pi hung, lost power, or lost its radio | `..._alive` **unavailable** and `..._last_stop` *did not move* |
 | 3 | nothing arriving from the mixer | `..._feed` on; its attributes name which side |
-| 4 | **the overnight schedule -- healthy** | `..._brightness` reads `0.0` |
+| 4 | **the overnight schedule -- healthy, and the likeliest answer on 2026-09-07** | `..._brightness` reads `night_floor`, and the panel is visibly glowing |
 | 5 | frames composing, panel not showing them | `..._alive` on, with `error` in its attributes |
 
-Cause 4 is the one that nearly got missed. `brightness_at` returns 0.0 from
-23:03 to 07:00 and `app.py` pushes true black, not a dimmed frame. The panel
-found dark at 06:20 on 2026-09-07 was **inside that window**, and the power
-cycle could not have lit it before 07:00. An instrument that does not publish
-brightness sends someone hunting a fault that was never there.
+### The dark panel of 2026-09-07 was probably never a fault
+
+Stated plainly rather than left as one candidate among five, because a list
+with a ghost in it is a list nobody can close.
+
+At the time, `brightness_at` returned 0.0 between 23:03 and 07:00 and
+`app.py` pushed true black rather than a dimmed frame. **The panel was
+supposed to be black at 06:20.** (It no longer goes black at all — see
+[Overnight floor](#burn-in) — which is the direct consequence of this
+morning.) The power cycle that appeared to fix it booted at 06:22:40 -- still
+inside the window -- and could not have lit the panel before 07:00. What lit
+it was 07:00 arriving.
+
+Nothing in the surviving evidence asks for a fault. The wifi watchdog's
+consecutive-failure counter was at zero, NetworkManager logged no carrier
+loss, and the client logged no disconnect.
+
+This cannot be proved to the hilt, and the reason is the point: the journal
+from before that reboot is precisely what was lost, which is why the first
+half of this work exists. But the schedule doing exactly what it was built to
+do explains everything that was observed, and a fault explains none of it
+better. Treat it as the answer, not an open question.
+
+Two things make it readable next time, and they answer for two different
+people. In the room, the panel no longer goes dark at all: it rests at
+`night_floor`, so a glow means alive and no terminal is needed. For anyone not
+standing in front of it, `sensor.ambient_display_pixelpup_brightness` carries
+the same number. Either alone would have been enough this morning; the pair
+covers both places the question gets asked from.
 
 ### Three publishers, and why it takes three
 

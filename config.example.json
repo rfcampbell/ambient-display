@@ -46,6 +46,8 @@
     "evening": "20:00",
     "sleep": "23:00",
     "night_level": 0.55,
+    "_night_floor": "the panel rests here overnight instead of true black, so a glow means alive. 0.10 is the lowest value at which every ink still renders on all three channels after the SSD1351 truncates to RGB565; below ~0.05 the blue drops and the placard shifts green. Set 0 for true black. Try candidates live at /night-floor?v=..&hold=1 before committing one here.",
+    "night_floor": 0.10,
     "fade_seconds": 180
   },
 

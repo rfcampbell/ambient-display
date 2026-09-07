@@ -6,13 +6,20 @@ room:
   1. the process died, or is crash-looping
   2. the Pi hung, lost power, or lost its wifi
   3. nothing is arriving from the mixer -- broker down, or jungler silent
-  4. THE OVERNIGHT SCHEDULE, which is healthy. `brightness_at` returns 0.0
-     from 23:03 to 07:00 and app.py pushes true black, not a dimmed frame.
-     On 2026-09-07 the panel was found dark at 06:20 and power-cycled; that
-     is inside the blank, and the reboot could not have lit it before 07:00.
-     An instrument that does not report this sends someone hunting a fault
-     that was never there.
+  4. THE OVERNIGHT SCHEDULE, which is healthy. This one is now largely
+     answered in the room rather than here: as of 2026-09-07 the panel rests
+     at `night_floor` between 23:03 and 07:00 instead of going to true black,
+     so a glow means alive. It was true black before, and that cost a
+     morning -- the panel was found dark at 06:20, which is inside the blank,
+     and the power cycle could not have lit it before 07:00. `brightness` is
+     published here so the same fact is readable by whoever is not standing
+     in front of it.
   5. the process is fine and composing frames the panel is not showing
+
+There is a sixth, and it is the one the floor does not cover: NOTHING TO
+DRAW. `Display.tick` still blanks the panel when there is no slide, at any
+hour. It used to share a branch with the night blank, which made it
+invisible; it is now `no_slides` in the payload below.
 
 This publishes enough to tell them apart.
 
@@ -193,10 +200,21 @@ class Heartbeat:
             "result": "failing" if self.last_error else "ok",
             "error": self.last_error,
             "device": self.device_name,
-            # Cause 4. Without this, a correctly blank panel at 03:00 is
-            # indistinguishable from a broken one.
+            # Cause 4, and the reason it is readable at all. The panel no
+            # longer goes to true black overnight -- it rests at
+            # `night_floor` -- so in the room a glow means alive. This is the
+            # same fact for whoever is not in the room.
             "brightness": round(bright, 3),
+            "night_floor": s.get("night_floor"),
+            "night_hold": s.get("night_hold"),
+            # Dark on purpose: only reachable now with the floor switched off
+            # deliberately. Kept because "deliberately off" and "broken" must
+            # still be different readings.
             "scheduled_dark": bool(bright <= 0.0),
+            # The last remaining way to a black panel that nobody chose. It
+            # used to be fused with the night blank in one branch and was
+            # therefore invisible; now it is a field.
+            "no_slides": bool(s.get("no_slides")),
             "ticks": self.ticks,
             "frames": self.frames,
             "pushes_failed": self.pushes_failed,
@@ -225,7 +243,8 @@ class Heartbeat:
         and a heartbeat that publishes at 12 Hz is a heartbeat that will be
         turned off.
         """
-        return (body["result"], body["scheduled_dark"], body["connected"],
+        return (body["result"], body["scheduled_dark"], body["no_slides"],
+                body["night_hold"], body["connected"],
                 body["mixer_online"], body["have_contract"], body["records"],
                 body["pushes_failed"])
 

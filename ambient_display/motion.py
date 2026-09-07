@@ -183,12 +183,47 @@ def _seconds(hhmm):
     return (int(hours) * 3600 + int(minutes or 0) * 60) % 86400
 
 
+def night_floor_of(sched):
+    """The overnight floor, clamped -- defined ONCE.
+
+    It was briefly defined twice, and the two disagreed: `brightness_at`
+    clamped the floor to `night_level` so a silly value could not brighten the
+    panel at 23:03, and `final_brightness` then re-applied the raw number and
+    undid it. `night_floor: 0.9` came out at 0.900 in the middle of the night,
+    which is brighter than the evening step it is supposed to fade below.
+
+    Nothing was broken by that for a day, which is the point: two copies of a
+    rule drift, and the copy that loses is the one nobody reads. One
+    definition, both callers.
+    """
+    floor = max(0.0, min(1.0, float(sched.get("night_floor", 0.10))))
+    night = max(0.0, min(1.0, float(sched.get("night_level", 0.55))))
+    # A floor above the evening step would brighten the panel at 23:03, which
+    # is the opposite of a fade. Clamp rather than honour it.
+    return min(floor, night)
+
+
 def brightness_at(now_local, cfg):
     """Brightness 0..1 for a datetime, following the schedule.
 
-    Full through the day, easing down through the evening, off overnight.
-    The overnight blank is the point -- an OLED showing nothing at 3am is an
-    OLED that still looks new in five years.
+    Full through the day, easing down through the evening, and overnight down
+    to `night_floor` -- NOT to zero.
+
+    WHY NOT ZERO. It used to be zero, and that was a mistake paid for on
+    2026-09-07: the panel was found dark at 06:20, which is inside the blank,
+    and the morning went on trying to work out whether it had died. A dark
+    panel and a dead panel are the same photograph. The floor exists so the
+    room can answer that question without a terminal -- if it is glowing at
+    all, it is alive.
+
+    Burn-in was the original reason for the blank and it is still real, so the
+    floor is small: at 0.10 of an already-low palette the panel is a faint
+    glow, and the drift in `Drift` keeps moving underneath it exactly as it
+    does by day, so nothing is held in one place all night.
+
+    Set `night_floor: 0` to get the old true-black behaviour back. That is
+    then an explicit choice, made in one place, rather than the default nobody
+    picked.
     """
     if not cfg.get("enabled", True):
         return 1.0
@@ -197,6 +232,7 @@ def brightness_at(now_local, cfg):
     evening = _seconds(cfg.get("evening", "20:00"))
     sleep = _seconds(cfg.get("sleep", "23:00"))
     night = max(0.0, min(1.0, float(cfg.get("night_level", 0.55))))
+    floor = night_floor_of(cfg)
     fade = max(1.0, float(cfg.get("fade_seconds", 180)))
 
     now = (now_local.hour * 3600 + now_local.minute * 60 + now_local.second - wake) % 86400
@@ -205,13 +241,48 @@ def brightness_at(now_local, cfg):
     if sleep <= evening:
         sleep = evening + 1.0
 
-    anchors = sorted([(0.0, 0.0), (fade, 1.0), (evening, 1.0),
-                      (sleep, night), (min(sleep + fade, 86399.0), 0.0),
-                      (86400.0, 0.0)], key=lambda a: a[0])
+    anchors = sorted([(0.0, floor), (fade, 1.0), (evening, 1.0),
+                      (sleep, night), (min(sleep + fade, 86399.0), floor),
+                      (86400.0, floor)], key=lambda a: a[0])
 
     for (t0, v0), (t1, v1) in zip(anchors, anchors[1:]):
         if t0 <= now <= t1:
             if t1 == t0:
                 return v1
             return v0 + (v1 - v0) * ((now - t0) / (t1 - t0))
-    return 0.0
+    return floor
+
+
+def final_brightness(now_local, cfg):
+    """THE ONE PLACE THAT DECIDES HOW BRIGHT THE PANEL IS.
+
+    It exists because the floor in `brightness_at` was not enough on its own.
+    An audit on 2026-09-07 found three separate ways to reach true black, and
+    a floor on the schedule curve only closed one of them:
+
+      * the schedule easing to 0.0 overnight             -- closed by the floor
+      * `display.brightness` used as a multiplier: any
+        config with 0.0 there zeroes the product however
+        well-behaved the curve is                        -- closed here
+      * `incoming is None` in Display.tick, which blanks
+        the panel at any hour                            -- closed in app.py,
+        where it is now reported rather than silent
+
+    The second is the one worth naming. A brightness floor that a config
+    typo one line away can multiply back to zero is not a floor, it is a
+    suggestion -- the same shape as a watchdog whose recovery call was wrong,
+    or a health sensor downstream of the thing it watches. So the clamp is
+    applied AFTER the trim, and it is applied here, once, rather than at each
+    of the callers.
+
+    Turning the panel genuinely off is still possible and still supported --
+    `night_floor: 0`, or `schedule.enabled: false` -- but it now has to be
+    said out loud rather than arrived at by arithmetic.
+    """
+    sched = cfg.get("schedule", {})
+    b = brightness_at(now_local, sched)
+    b *= float(cfg.get("display", {}).get("brightness", 1.0))
+    floor = night_floor_of(sched)
+    if sched.get("enabled", True) and floor > 0.0:
+        b = max(b, floor)
+    return max(0.0, min(1.0, b))

@@ -228,8 +228,70 @@ def create_app(ctl):
     def status_json():
         return jsonify(ctl.status())
 
+    @app.get("/night-floor")
+    def night_floor():
+        """Try candidate night floors by eye, from a phone, in a dark room.
+
+        A GET that mutates, which is not how this would be written if it were
+        an API. It is a bench knob: the thing it is for is standing in front
+        of the panel at midnight typing a URL one-handed, and a form or a POST
+        would make that worse for no benefit anyone here gets.
+
+            /night-floor              what is set now
+            /night-floor?v=0.08       set the floor
+            /night-floor?v=0.08&hold=1  ...and show it NOW, whatever the hour
+            /night-floor?hold=0       back to the real schedule
+
+        EPHEMERAL ON PURPOSE. Nothing is written to config.json. A value tried
+        at midnight and forgotten is gone at the next restart rather than
+        quietly becoming the deployed setting -- and `night_hold` in
+        particular would pin the panel dim through a whole day if it could
+        outlive the session that set it. Once a value has been chosen, put it
+        in config.json by hand; that is the deliberate act, and this is not.
+
+        Every change is logged, and the journal survives reboots as of
+        2026-09-07, so what was tried and when is answerable afterwards.
+        """
+        sched = ctl.cfg["schedule"]
+        changed = []
+
+        raw = request.args.get("v")
+        if raw is not None:
+            try:
+                value = float(raw)
+            except ValueError:
+                return jsonify(error=f"not a number: {raw!r}"), 400
+            if not 0.0 <= value <= 1.0:
+                return jsonify(error=f"floor must be 0..1, got {value}"), 400
+            sched["night_floor"] = value
+            changed.append(f"night_floor={value}")
+
+        raw = request.args.get("hold")
+        if raw is not None:
+            ctl.night_hold = raw not in ("0", "false", "no", "")
+            changed.append(f"night_hold={ctl.night_hold}")
+
+        if changed:
+            log.warning("bench: %s (runtime only, not written to config.json)",
+                        ", ".join(changed))
+
+        floor = float(sched.get("night_floor", 0.10))
+        return jsonify(
+            night_floor=floor,
+            night_hold=ctl.night_hold,
+            brightness_now=ctl.status().get("brightness"),
+            window=f"{sched.get('sleep', '23:00')}+{sched.get('fade_seconds', 180)}s"
+                   f" .. {sched.get('wake', '07:00')}",
+            note="runtime only; put the chosen value in config.json to keep it",
+        )
+
     @app.get("/healthz")
     def healthz():
+        # NOT A HEALTH CHECK, despite the name. It answers from the Flask
+        # daemon thread and knows nothing about whether the render loop is
+        # still turning -- it would say "ok" through a completely wedged
+        # renderer. The real liveness signal is the MQTT heartbeat, which is
+        # emitted from inside that loop. See ambient_display/health.py.
         return "ok"
 
     return app
