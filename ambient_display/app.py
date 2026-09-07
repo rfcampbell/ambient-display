@@ -14,6 +14,7 @@ from PIL import Image
 
 from . import config as config_mod
 from . import device as device_mod
+from . import health
 from . import motion
 from . import records as records_mod
 from . import render
@@ -260,6 +261,31 @@ def main(argv=None):
     device = device_mod.make(cfg)
     log.info("display device: %s", cfg["display"]["device"])
 
+    # BUILT HERE, AFTER THE DEVICE, AND THAT IS NOT AN ACCIDENT. Everything
+    # above this line can fail -- config.load, device.make on a panel that
+    # will not initialise -- and a heartbeat constructed earlier would still
+    # not survive to report it, because the process exits. Those failures
+    # belong to deploy/display-stop-notify, which systemd runs after a start
+    # that died in its first second. See health.py for the full list of what
+    # this covers and what it structurally cannot.
+    beat = None
+    if not offline:
+        beat = health.Heartbeat(feed, cfg["display"]["device"])
+        health_topic = feed.self_topic("display/health")
+
+        def announce():
+            """Re-assert discovery and beat at once on every (re)connect, so a
+            reconnect is not followed by up to a full interval of silence --
+            and so a broker that lost its retained set heals itself."""
+            for topic, body in beat.discovery(health_topic,
+                                              feed.self_availability_topic):
+                feed.publish_raw(topic, body, retain=True)
+            beat.maybe_publish(display, force=True)
+
+        feed.on_connect_hook = announce
+        if feed.connected:          # connected already while we were setting up
+            announce()
+
     if cfg["preview"].get("enabled", True):
         from .preview import create_app
         server = create_app(display)
@@ -280,13 +306,37 @@ def main(argv=None):
     try:
         while not stop.is_set():
             started = time.monotonic()
+            if beat:
+                beat.note_tick()
             image = display.tick(started)
             # Only touch the bus when the pixels actually changed; a static
             # placard should cost nothing.
             payload = image.tobytes()
             if payload != last_pushed:
-                device.display(image)
+                try:
+                    device.display(image)
+                except Exception as exc:
+                    # This was unguarded, so an SPI fault killed the process
+                    # and a restart was the only trace it left. THE CRASH IS
+                    # KEPT: a restart re-initialises the panel and may well
+                    # clear a transient fault, and Restart=always is what
+                    # actually recovers the room. What changes is that it no
+                    # longer happens silently -- the beat goes out first
+                    # carrying the exception, and display-stop-notify records
+                    # the stop from outside the process.
+                    if beat:
+                        beat.note_push(error=exc)
+                        beat.maybe_publish(display, started, force=True)
+                    log.error("panel write failed: %s", exc)
+                    raise
+                if beat:
+                    beat.note_push()
                 last_pushed = payload
+            # From inside the loop, never from a thread of its own: a beat on
+            # its own timer would go on reporting health through a wedged
+            # renderer, which is precisely how /healthz already lies.
+            if beat:
+                beat.maybe_publish(display, started)
             stop.wait(max(0.0, interval - (time.monotonic() - started)))
     finally:
         log.info("stopping")

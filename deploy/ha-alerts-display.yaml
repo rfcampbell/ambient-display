@@ -1,0 +1,198 @@
+# Home Assistant: the alerts for pixelpup's placard.
+#
+# GOES IN: automations.yaml -- append, it is a plain list. Do NOT include the
+# `automation:` key. Reload automations afterwards.
+#
+# WHY THIS FILE SHIPS WITH THE SENSORS AND NOT LATER. ambient-mixer already
+# paid for the alternative: on 2026-09-02 a sweep found six of its ten
+# published entities reached Home Assistant and stopped there -- no
+# automation, no dashboard, no reference of any kind. Two of them were
+# instruments built specifically to raise an alarm. A retained topic nobody
+# subscribes to is a page nobody has, one layer further out.
+#
+# THE QUESTION ASKED OF EACH ALARM BELOW, separately, because asking it of
+# the set is what failed on 2026-09-03: WHAT STATE MUST THE SYSTEM BE IN FOR
+# THIS TO FIRE, AND IS THAT STATE AVAILABLE DURING THE FAILURE IT NAMES?
+# Three alarms on jungler were each individually correct and collectively
+# silent for 23 hours, because every one of them was downstream of the engine
+# having started. They looked independent -- different topics, different
+# triggers, written months apart -- and shared one hidden precondition.
+#
+# THE COMMON-MODE FAILURE THAT REMAINS, stated because it is not fixed here:
+# every alert below needs Home Assistant and mosquitto, and both run on robix.
+# Nothing outside robix watches robix. If that box goes down the placard could
+# be dark for a week and none of this would say a word.
+
+# ---------------------------------------------------------------------------
+# 1. THE DEADMAN. The placard has stopped talking.
+#
+# TRIGGERS ON `unavailable`, NOT ON A STATE VALUE, and that is the whole
+# point. `ambient_health_jungler_failing` watched for 'on' and sat silent
+# through a 23-hour crash loop, because the deadman it was built on expires
+# to `unavailable` and never produces 'on' at all. An expire_after alarm that
+# triggers on a state is an alarm wired to nothing.
+#
+# Precondition: needs Home Assistant, the broker, and the entity to have been
+# provisioned at least once. It does NOT need pixelpup to be up -- which is
+# the failure it names. This is the only alert here that can speak when the
+# Pi has hung, lost power, or lost its radio.
+#
+# `for: 5 minutes` because the entity also goes unavailable via the last will
+# on any ordinary restart, which clears in about ten seconds. Five minutes
+# distinguishes a restart from an absence without waiting out a morning.
+- id: ambient_display_pixelpup_unavailable
+  alias: "Placard (pixelpup) has stopped reporting"
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.ambient_display_pixelpup_alive
+      to: "unavailable"
+      for:
+        minutes: 5
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "Placard silent (pixelpup)"
+        message: >-
+          binary_sensor.ambient_display_pixelpup_alive has been unavailable for
+          5 minutes. The heartbeat is published from inside the render loop, so
+          this means the loop stopped, the process died, or the Pi/its radio
+          went away. Which one is readable from
+          sensor.ambient_display_pixelpup_last_stop: if it moved, the process
+          died and the box survived to say so. If it did NOT move, systemd
+          never got to run the notifier -- the box or the network went. The
+          journal on pixelpup survives reboots as of 2026-09-07; ssh in and
+          read `journalctl -b -1`.
+
+# ---------------------------------------------------------------------------
+# 2. THE PLACARD DIED AND THE BOX SURVIVED TO SAY SO.
+#
+# Published by deploy/display-stop-notify from ExecStopPost -- OUTSIDE the
+# process -- so it fires for a start that never completed: a bad config.json,
+# an SSD1351 that will not initialise, a venv missing luma.oled. Those are
+# exactly the failures the in-process heartbeat is structurally blind to,
+# because it is constructed after device.make.
+#
+# Driven on 2026-09-07 against a deliberately broken display.device: six
+# restarts in 36 s, `state=failed service_result=exit-code`, restarts climbing
+# 0..5 -- while the retained health topic went on reading `result=ok` from the
+# last start that worked. That stale green is why this alert is not optional.
+#
+# Precondition: needs pixelpup's OS alive enough to run ExecStopPost, and the
+# broker reachable. Blind to a hung Pi or a power cut -- alert 1 covers those.
+- id: ambient_display_pixelpup_stopped_badly
+  alias: "Placard (pixelpup) stopped badly"
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.ambient_display_pixelpup_stopped_badly
+      to: "on"
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "Placard stopped badly (pixelpup)"
+        message: >-
+          The placard exited without being asked to.
+          systemd called it
+          {{ state_attr('binary_sensor.ambient_display_pixelpup_stopped_badly',
+             'service_result') }}
+          (exit status
+          {{ state_attr('binary_sensor.ambient_display_pixelpup_stopped_badly',
+             'exit_status') }}),
+          restart count now
+          {{ states('sensor.ambient_display_pixelpup_stop_restarts') }}.
+          A count that keeps climbing is a crash loop; one that stops is a
+          single fault. systemd's count, not the process's own -- the
+          in-process twin can only report restarts it survived.
+
+# ---------------------------------------------------------------------------
+# 3. A CRASH LOOP, as distinct from one crash.
+#
+# The fault nobody could see on jungler: 291 restarts over 23 hours, each one
+# individually survivable, backoff making it quiet rather than visible. A
+# count without an epoch cannot be read -- 12 restarts since a start three
+# weeks ago is a quiet box, 12 since ten minutes ago is a loop -- so this
+# watches the RATE, not the value.
+#
+# Precondition: same as alert 2. Note this can fire while alert 1 stays quiet:
+# a placard that dies and restarts every 7 s is never unavailable for a whole
+# 5 minutes. Measured on 2026-09-07 -- the six-restart loop lasted 36 s and
+# would not have reached alert 1's threshold at all. The two are not
+# redundant; each covers a window the other misses.
+- id: ambient_display_pixelpup_restart_loop
+  alias: "Placard (pixelpup) is restarting in a loop"
+  mode: single
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.ambient_display_pixelpup_stop_restarts
+      above: 3
+  condition:
+    # Only when the climbing is recent. `last_stop` is a timestamp, so it says
+    # when, and a stale high count from last week must not page anyone.
+    - condition: template
+      value_template: >-
+        {{ (now() -
+            states('sensor.ambient_display_pixelpup_last_stop') | as_datetime
+           ).total_seconds() < 900 }}
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "Placard crash loop (pixelpup)"
+        message: >-
+          sensor.ambient_display_pixelpup_stop_restarts is at
+          {{ states('sensor.ambient_display_pixelpup_stop_restarts') }}
+          with the last stop at
+          {{ states('sensor.ambient_display_pixelpup_last_stop') }}.
+          The placard is failing and being restarted. Read
+          `journalctl --user -u ambient-display -b` on pixelpup; if the count
+          climbs with no health beats in between, it is dying before the
+          heartbeat is constructed -- look at config.json and the panel.
+
+# ---------------------------------------------------------------------------
+# 4. THE PLACARD IS FINE AND HAS NOTHING TO SHOW.
+#
+# Deliberately a separate entity from the deadman rather than folded into one
+# "ok" verdict. A placard displaying the idle record over a silent mixer is a
+# HEALTHY placard reporting a real thing, and merging the two produces an
+# alarm that cannot be acted on -- the presence-read-as-correctness fault
+# ambient-mixer's health.py names five times over.
+#
+# Precondition: needs the placard alive and beating, since this rides the same
+# payload. If the placard is down this goes unavailable and alert 1 speaks
+# instead. That is the intended division, not an oversight.
+- id: ambient_display_pixelpup_no_feed
+  alias: "Placard (pixelpup) is receiving nothing"
+  mode: single
+  trigger:
+    - platform: state
+      entity_id: binary_sensor.ambient_display_pixelpup_feed
+      to: "on"
+      for:
+        minutes: 10
+  action:
+    - service: notify.persistent_notification
+      data:
+        title: "Placard has no feed (pixelpup)"
+        message: >-
+          The placard is alive but has no contract to show. connected={{
+          state_attr('binary_sensor.ambient_display_pixelpup_feed',
+          'connected') }}, mixer_online={{
+          state_attr('binary_sensor.ambient_display_pixelpup_feed',
+          'mixer_online') }}. connected=false is the broker or pixelpup's
+          radio; connected=true with mixer_online=false is jungler's engine.
+          The placard itself is working -- it is showing the idle record.
+
+# ---------------------------------------------------------------------------
+# NOT AN ALERT, ON PURPOSE: sensor.ambient_display_pixelpup_ticks.
+#
+# It exists to be GRAPHED. A flat line with brightness above zero is a render
+# loop that has stopped turning, and it shows that on a chart well before
+# expire_after fires. It gets no automation because the deadman already covers
+# the wedge -- the beat is emitted from inside the loop, so a wedged loop stops
+# it -- and a second alarm on the same fault is two pages for one problem.
+#
+# AND NOT AN ALERT: sensor.ambient_display_pixelpup_brightness. Also for the
+# graph. It is what makes a dark panel readable rather than alarming: 0.0
+# between 23:03 and 07:00 is the overnight blank working correctly, and on
+# 2026-09-07 a panel found dark at 06:20 was inside that window. An alert on
+# darkness would have paged every night.

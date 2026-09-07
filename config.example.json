@@ -8,7 +8,9 @@
     "use_state": true,
     "username": null,
     "password": null,
-    "client_id": null
+    "client_id": null,
+    "_publish_base": "where WE publish. The four topics above are the mixer's and we only read them. Defaults to ambient/<hostname>, so pixelpup publishes under ambient/pixelpup. Never share it between machines: two boxes on one topic means a live one holds a dead one green.",
+    "publish_base": null
   },
 
   "display": {

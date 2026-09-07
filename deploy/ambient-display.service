@@ -26,6 +26,27 @@ Type=simple
 WorkingDirectory=/home/rcampbell/ambient-display
 ExecStart=/home/rcampbell/ambient-display/.venv/bin/python -m ambient_display
 Environment=PYTHONUNBUFFERED=1
+# So the client and the stop notifier can read their own NRestarts without the
+# unit name being written down in two places. %n is the full unit name.
+Environment=AMBIENT_UNIT=%n
+
+# THE ONLY THING PRESENT AT A START THAT NEVER COMPLETES. The heartbeat in
+# health.py is built in app.main, after config.load and after device.make --
+# so a bad config.json or a panel that will not initialise kills the process
+# before any instrument inside it exists, and the placard's own entities sit
+# on their last retained values looking well. That is what jungler did for 23
+# hours and 291 restarts on 2026-09-03.
+#
+# ExecStopPost runs after EVERY stop, including one where ExecStart died in
+# its first second, so this is where a failed start can be made to say so.
+#
+# The `-` is not decoration: it makes systemd ignore a non-zero exit from the
+# notifier. A broker that is down must not convert a failed start into a
+# differently failed start.
+#
+# Called through the venv interpreter, not by shebang: paho is the venv's, and
+# a shebang would reach the system python3, which does not have it.
+ExecStopPost=-/home/rcampbell/ambient-display/.venv/bin/python /home/rcampbell/ambient-display/deploy/display-stop-notify
 
 # always, not on-failure. SIGTERM makes the client exit 0 -- it blanks the
 # panel and returns cleanly -- so a session teardown or a stray kill looks like

@@ -29,6 +29,14 @@ The `luma.emulator` and headless web-preview paths are still here, and still
 the way to work on slides without a panel in front of you. They are not what
 runs on pixelpup.
 
+The placard reports its own health to MQTT and provisions its Home Assistant
+entities by discovery -- see [Saying it is
+unhealthy](#saying-it-is-unhealthy). Before 2026-09-07 it had no way to say
+anything at all: a dark panel could mean the process had died, the Pi had
+hung, or nothing was arriving from the mixer, and all of them looked the same
+from the room. **journald on pixelpup is persistent as of the same date**, so
+the logs from a failing run survive the reboot that fixes it.
+
 ## Install
 
 ```sh
@@ -432,8 +440,13 @@ sudo reboot
 # then, once it is back:
 ls -l /dev/spidev0.0                       # the SPI device now exists
 systemctl --user status ambient-display    # active, and not restart-looping
-journalctl --user -u ambient-display -b    # this boot only
+journalctl --user -u ambient-display -b    # this boot
+journalctl --user -u ambient-display -b -1 # AND the boot before it
 ```
+
+That last line works because the journal is persistent now. It did not before
+2026-09-07 -- see [The journal survives a
+reboot](#the-journal-survives-a-reboot).
 
 The nginx vhost is robix-only. It proxies the typography bench, which is a
 tuning tool, not part of the placard; pixelpup serves the same bench directly
@@ -468,6 +481,176 @@ losing power mid-write, and a watchdog neither prevents nor detects that. If
 this card dies the same way again, the things that would actually help are a
 better-quality card, or moving the root filesystem to read-only or USB. Say
 the word and that can be a separate piece of work.
+
+### The journal survives a reboot
+
+It did not until 2026-09-07, and the way that was discovered is the part worth
+keeping: the placard was found dark, a power cycle fixed it, and the logs from
+the failing run were simply gone. `journalctl --list-boots` showed one boot.
+The question died with the box, for the second time.
+
+**It was not incidentally persistent. It was not persistent at all.**
+Raspberry Pi OS ships a vendor drop-in that pins the journal into RAM:
+
+```
+/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf  ->  Storage=volatile
+```
+
+`/var/log/journal` existed, empty, since June -- which looks exactly like a
+working persistent journal and is not one. That directory only enables
+persistence under `Storage=auto`; `volatile` ignores it. Everything was going
+to `/run/log/journal`, tmpfs, capped at 8.3 M, and it had **rotated three
+times in the four hours since boot**. Pixelpup was losing history in hours,
+never mind across reboots.
+
+Worse, and worth staring at: `systemd-journal-flush.service` read
+`active (exited)`, `status=0/SUCCESS`, and logged *"Finished Flush Journal to
+Persistent Storage."* It flushed nothing. With `Storage=volatile` the flush is
+a documented no-op. A green check, with that name, on the exact operation
+whose absence cost the morning -- the same family as a watchdog logging
+`bouncing wlan0` and bouncing nothing.
+
+The fix is jungler's, verbatim, in `deploy/journald-persistent.conf`:
+
+```sh
+sudo install -d -m 0755 /etc/systemd/journald.conf.d
+sudo install -Dm644 deploy/journald-persistent.conf \
+    /etc/systemd/journald.conf.d/99-persistent-storage.conf
+sudo systemctl restart systemd-journald && sudo journalctl --flush
+```
+
+`99-` sorts after `40-`, so it wins. The `--flush` is not optional: it moves
+the *current* boot out of tmpfs onto disk, so the reboot that proves this has
+something to preserve. Without it `--list-boots` shows one boot afterwards,
+which looks identical to failure.
+
+**Verify on the machine, never from the repo.** Reading tells you what was
+meant; running tells you what is:
+
+```sh
+systemd-analyze cat-config systemd/journald.conf | grep -i storage
+    # Storage=volatile THEN Storage=persistent -- the second one wins
+journalctl --header | grep '^File path' | head -1
+    # /var/log/journal/... not /run/log/journal/...
+journalctl -b -u systemd-journald | grep 'System Journal'
+    # journald's OWN words for the cap it adopted, not the file's
+sudo reboot
+journalctl --list-boots
+    # MORE THAN ONE LINE. This is the only check that answers the question.
+```
+
+The first three only prove the config was read. Driven on 2026-09-07: boot
+`f4ed99d6` survived its own reboot and stayed readable through
+`systemd-journald: Journal stopped`.
+
+## Saying it is unhealthy
+
+A dark panel has **five** causes and every one of them looks the same from the
+room:
+
+| | cause | what says so |
+|---|---|---|
+| 1 | the process died, or is crash-looping | `..._stopped_badly` on, `..._stop_restarts` climbing |
+| 2 | the Pi hung, lost power, or lost its radio | `..._alive` **unavailable** and `..._last_stop` *did not move* |
+| 3 | nothing arriving from the mixer | `..._feed` on; its attributes name which side |
+| 4 | **the overnight schedule -- healthy** | `..._brightness` reads `0.0` |
+| 5 | frames composing, panel not showing them | `..._alive` on, with `error` in its attributes |
+
+Cause 4 is the one that nearly got missed. `brightness_at` returns 0.0 from
+23:03 to 07:00 and `app.py` pushes true black, not a dimmed frame. The panel
+found dark at 06:20 on 2026-09-07 was **inside that window**, and the power
+cycle could not have lit it before 07:00. An instrument that does not publish
+brightness sends someone hunting a fault that was never there.
+
+### Three publishers, and why it takes three
+
+**The heartbeat** (`ambient_display/health.py`) -- retained on
+`ambient/pixelpup/display/health` every 30 s, `expire_after` 120.
+**It is emitted from inside the render loop, not from a thread of its own.**
+`preview.healthz` already returns `"ok"` unconditionally from the Flask daemon
+thread with no reference to the render loop; it would go on saying ok through
+a completely wedged renderer. The last wifi outage was found by noticing the
+placard had frozen -- that same wedge, seen by eye. A beat on its own timer
+would put that lie on MQTT, where it would read as a green entity covering a
+dead panel.
+
+**The last will** -- retained on `ambient/pixelpup/availability`. Fires when
+the broker notices the socket ended.
+
+**The stop notifier** (`deploy/display-stop-notify`) -- run by
+`ExecStopPost=`, *outside* the process, publishing
+`ambient/pixelpup/display/laststop`.
+
+### What each covers, and what none of them can
+
+The heartbeat is built in `app.main` **after** `config.load` and after
+`device.make`. So a bad `config.json` or a panel that will not initialise kills
+the process before any instrument inside it exists. That is jungler on
+2026-09-03: 291 restarts over 23 hours while
+`sensor.ambient_health_jungler_restarts` went on reporting `1` from the last
+start that worked. **An instrument inside the thing it measures cannot report
+the failures that precede its own initialisation.** It is structural. The stop
+notifier is the answer, and it is not an optional extra.
+
+`expire_after` and the last will are **not** the same mechanism:
+
+- the will is the *broker* saying the TCP session ended -- prompt for a crash,
+  and it needs keepalive × 1.5 for a frozen box
+- `expire_after` is Home Assistant saying nothing has been *said* -- the only
+  one of the two that catches a process holding a healthy socket while no
+  longer doing its work
+
+Driven on 2026-09-07, and this is the measurement that justifies keeping both:
+with the render loop stopped and the client left running, **`availability`
+stayed `online` for the full 120 s**. The will never fired. Staleness was the
+only thing that noticed.
+
+Not covered, said plainly so nobody reads this as covering everything:
+
+- **A broker that cannot be reached.** Then neither the heartbeat nor the stop
+  notifier publishes, and a crash loop during a network outage is silent from
+  this end. Covered from the other side by `expire_after` → `unavailable`.
+- **Telling a hung Pi from a dead radio from a dead broker, at the time.** All
+  three are silence and silence carries no detail. That discrimination is
+  retroactive and local -- it is what persistent journald buys, which is why
+  both halves shipped the same day. This says *that* the placard went quiet
+  and *when*. The journal says why.
+- **Anything at all if Home Assistant or mosquitto is down.** Both run on
+  robix. Nothing outside robix watches robix.
+
+### The alerts are part of the work
+
+`deploy/ha-alerts-display.yaml`, appended to `automations.yaml`. ambient-mixer
+already paid for shipping sensors without them: six of its ten entities
+reached Home Assistant and stopped there, two of which existed only to raise
+an alarm. A retained topic nobody subscribes to is a page nobody has, one
+layer further out.
+
+The deadman alert **triggers on `unavailable`, not on a state value.** An
+`expire_after` sensor never produces `on`; it produces `unavailable`. Watching
+for `on` is what left `ambient_health_jungler_failing` silent through 23 hours
+of crash loop -- an alarm correctly wired to nothing.
+
+### Driving it against known-bad cases
+
+Reading tells you what was meant. Each of these was run on the box:
+
+| case | how | what was observed |
+|---|---|---|
+| crash | `kill -9 $(systemctl --user show ambient-display -p MainPID --value)` | availability `offline` at +4.8 s, `laststop` `state=failed service_result=signal` at +5.5 s, back `online` at +11.8 s, `restarts` 1→2 |
+| **start that never completes** | `display.device` set to a bogus value | six restarts in 36 s, `laststop` climbing 0→5 with `service_result=exit-code`, **and `display/health` never republished -- its retained value read `result=ok` throughout** |
+| render loop wedged | harness driving the real `Feed`/`Heartbeat`, beats stopped, client left running | `availability` stayed `online` for the full 120 s; only staleness caught it |
+| network away | `nmcli device disconnect wlan0` | **NOT YET DRIVEN.** Needs root on pixelpup, which is password-gated. The prediction is: heartbeat goes stale, and `laststop` does *not* move -- systemd never ran the notifier, and that absence is the whole discriminator. Until it has been watched, it is a prediction and is written here as one. |
+
+**A testing trap worth writing down.** The first crash test used
+`systemctl --user kill -s SIGKILL`, and the stop notifier published nothing --
+which reads exactly like a broken notifier. It is not. `systemctl kill`
+defaults to `--kill-whom=all`, which SIGKILLs the whole cgroup *including the
+ExecStopPost helper as it is spawned into it*. Measured: `--kill-whom=main`
+and a plain `kill -9` on the PID both run the notifier correctly. **The test
+method manufactured the failure.** Use `kill -9` on the PID.
+
+
 
 ### The wifi watchdog
 
@@ -588,11 +771,16 @@ ambient_display/
   theme.py      fonts, weights, sizes, colours         <- and the knobs here
   mapdraw.py    coastline projection and the dot
   motion.py     drift, featuring, slide rotation, day-night curve
-  feed.py       MQTT subscriber
+  feed.py       MQTT subscriber -- and the one publisher, with the last will
+  health.py     the heartbeat, and what it structurally cannot report
   device.py     noop | emulator | ssd1351
   preview.py    the web bench
 data/
   ne_110m_coastline_sa.json   Natural Earth, clipped (public domain)
+deploy/
+  display-stop-notify         the alarm that runs when the process could not
+  ha-alerts-display.yaml      the automations, without which none of it pages
+  journald-persistent.conf    so a failing run's logs outlive the reboot
 ```
 
 `render.render_slide(slide, theme, size, offset, brightness)` is pure, which

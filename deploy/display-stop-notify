@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Say that the placard stopped, from OUTSIDE the placard.
+
+    ExecStopPost=-/home/rcampbell/ambient-display/.venv/bin/python \
+        /home/rcampbell/ambient-display/deploy/display-stop-notify
+
+WHY THIS IS NOT IN ambient_display/health.py, WHICH IS THE ENTIRE POINT.
+
+The heartbeat in health.py is constructed in `app.main`, after the config is
+loaded and after `device.make` has brought the panel up. Every line before
+that can fail -- a malformed config.json, an SSD1351 that will not initialise,
+a venv missing luma.oled after an upgrade -- and in all of those cases the
+heartbeat has never existed and publishes nothing at all. The process would
+die, systemd would restart it, and it would die again, and the placard's own
+entities would sit on their last retained values looking perfectly well.
+
+That is not hypothetical. It is what jungler did on 2026-09-03: 291 restarts
+over 23 hours with the room silent, while sensor.ambient_health_jungler_
+restarts went on reporting `1` from the last start that worked, because the
+counter is read 274 lines after the line that was raising. An instrument
+inside the thing it measures cannot report the failures that precede its own
+initialisation. No amount of care inside the application fixes it; it is
+structural. So systemd -- the only party present at every failed start --
+does this publishing.
+
+WHAT THIS DOES NOT COVER, said plainly. If the broker is unreachable this
+publishes nothing and a crash loop is silent again. That case is covered from
+the other side: the heartbeat's `expire_after` turns into `unavailable` after
+120 s and the alert in deploy/ha-alerts-display.yaml pages on THAT, not on a
+state value. The two mechanisms compose and NEITHER IS SUFFICIENT ALONE --
+this one catches a placard that cannot start while the network is fine, that
+one catches a box that has stopped talking at all. A hung Pi or a dead radio
+reaches neither, and is read afterwards from the journal, which is why
+journald persistence was fixed in the same sitting.
+
+WHY IT PUBLISHES ITS OWN DISCOVERY. Every other discovery payload in this
+project is published by the running client. This one cannot be: the failure
+it reports is a client that never ran, and on a box where it has never once
+started there would be no entity for an alarm to fire on. So the discovery is
+retained and re-asserted on every stop, which also heals a broker that has
+been wiped of its retained set.
+
+WHY NO expire_after ON THESE ENTITIES. A retained message replayed to Home
+Assistant on reconnect would re-arm an expiry clock from a corpse. The fact
+worth keeping -- "the last thing this unit did was fail" -- must go on being
+said however many times it is replayed. Freshness is the deadman's question
+and the deadman answers it.
+
+Never fails the unit. The `-` prefix in ExecStopPost makes systemd ignore a
+non-zero exit, and this exits 0 regardless: a broker that is down must not
+turn a failed start into a differently failed start.
+"""
+
+import datetime as dt
+import json
+import os
+import socket
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+
+# The same derivation as ambient_display/health.py. Duplicated rather than
+# imported on purpose: importing the package would pull in PIL, paho and the
+# whole config load, and this has to run in the wreckage of a failed start
+# where any of that may be exactly what is broken. Two lines is the cheaper
+# risk. Any change here must be mirrored in health.py.
+HOST = "".join(c if c.isalnum() else "_"
+               for c in socket.gethostname().split(".")[0].lower()) or "unknown"
+
+NODE = f"ambient_display_{HOST}"
+DISCOVERY_PREFIX = "homeassistant"
+
+# systemd's own vocabulary. Everything that is not `success` is a stop nobody
+# asked for. Compared against a literal rather than tested as `!= "success"`
+# so a value systemd adds in a future version is reported verbatim instead of
+# being silently bucketed.
+CLEAN = "success"
+
+
+def log(msg):
+    """To stderr, which is the journal -- and the journal now survives a
+    reboot, which it did not before 2026-09-07."""
+    print(f"display-stop-notify: {msg}", file=sys.stderr, flush=True)
+
+
+def mqtt_settings():
+    """host, port and our publish base, from the same config.json the client
+    reads. Parsed here rather than importing config.py, for the reason in the
+    docstring: this must work when importing the package does not."""
+    with open(os.path.join(ROOT, "config.json"), encoding="utf-8") as fh:
+        cfg = json.load(fh) or {}
+    m = cfg.get("mqtt", {}) or {}
+    base = str(m.get("publish_base") or f"ambient/{HOST}").strip("/")
+    return (m.get("host", "127.0.0.1"), int(m.get("port", 1883)), base,
+            m.get("username") or "", m.get("password") or "")
+
+
+def n_restarts(unit):
+    """What systemd counted -- the number the client could not read.
+
+    THE SCOPE IS VERIFIED, NOT ASSUMED. `systemctl show -p NRestarts` against
+    a unit that does not exist in the scope being queried returns `0` and
+    exits 0. Not an error: a confident zero, indistinguishable from a healthy
+    unit that has never restarted. Demonstrated on jungler on 2026-09-07 by
+    asking system scope for `ambient-mixer`, which is a user unit -- back came
+    `ActiveState=inactive, Result=success, NRestarts=0` for a service that had
+    then been running for a day and a half. This runs under ExecStopPost of a
+    *user* unit, so the scope is the one thing most likely to be got wrong by
+    a later edit, and a wrong scope here would publish `0` forever through a
+    crash loop. LoadState is therefore read alongside and `not-found` returns
+    None.
+
+    NOT off by one. Measured on jungler at 2026-09-04 19:31:42 against a live
+    crash loop: 290 before the attempt, systemd incremented to 291 when it
+    performed the restart, ExecStopPost read 291. The count already includes
+    the failure being reported. Stated because the first guess went the other
+    way and would have shipped as documentation.
+
+    Returns None if it cannot be read. A missing count is not zero; reporting
+    zero here would be the reassuring-number fault this file exists to end.
+    """
+    if not unit:
+        return None
+    scope = ["--user"] if os.environ.get("XDG_RUNTIME_DIR") else []
+    try:
+        out = subprocess.run(
+            ["systemctl", *scope, "show", unit,
+             "--property=LoadState", "--property=NRestarts"],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"NRestarts unreadable: {exc}")
+        return None
+    # KEY=value, not positional, and deliberately not `--value`. systemd
+    # prints properties in its own order regardless of the order requested --
+    # measured on pixelpup 2026-09-07, NRestarts comes out first either way --
+    # so reading fields by position swaps the count with the load state. The
+    # first version of this did that and returned None for a healthy unit.
+    props = dict(line.split("=", 1)
+                 for line in (out.stdout or "").splitlines() if "=" in line)
+    if props.get("LoadState") != "loaded":
+        log(f"unit {unit!r} not loaded in {'user' if scope else 'system'} "
+            f"scope: {out.stdout!r} -- refusing to report a count")
+        return None
+    val = props.get("NRestarts", "").strip()
+    return int(val) if val.isdigit() else None
+
+
+def payload():
+    """What systemd knows about the stop it has just performed."""
+    result = os.environ.get("SERVICE_RESULT", "unknown")
+    unit = os.environ.get("AMBIENT_UNIT", "")
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        # ok / failed, which is what the binary_sensor reads. The raw systemd
+        # word rides alongside: "exit-code", "watchdog", "timeout" and
+        # "core-dump" are four very different mornings.
+        "state": "ok" if result == CLEAN else "failed",
+        "service_result": result,
+        "exit_code": os.environ.get("EXIT_CODE") or None,
+        "exit_status": os.environ.get("EXIT_STATUS") or None,
+        "restarts": n_restarts(unit),
+        "unit": unit,
+        "host": HOST,
+        "last_stop_utc": now,
+    }
+
+
+def discovery(state_topic):
+    """Retained and self-provisioning. See the docstring for why the client
+    cannot publish these."""
+    device = {"identifiers": [NODE],
+              "name": f"ambient-display placard ({HOST})",
+              "manufacturer": "ambient-display", "model": "SSD1351 placard"}
+    common = {"state_topic": state_topic, "device": device,
+              "origin": {"name": "display-stop-notify"}}
+    return [
+        # THE ONE THAT PAGES, and the discriminator the whole design turns
+        # on. If this fires, the process died and THE BOX SURVIVED to say so.
+        # If the placard goes quiet and this does NOT move, the Pi or its
+        # radio went away -- systemd never got to run us. The absence is the
+        # signal, which is why nothing here carries expire_after to erase it.
+        (f"{DISCOVERY_PREFIX}/binary_sensor/{NODE}/stopped_badly/config", dict(
+            common, name=f"placard stopped badly ({HOST})",
+            unique_id=f"{NODE}_stopped_badly",
+            default_entity_id=f"binary_sensor.{NODE}_stopped_badly",
+            device_class="problem",
+            payload_on="failed", payload_off="ok",
+            value_template="{{ value_json.state }}",
+            json_attributes_topic=state_topic,
+            icon="mdi:television-off")),
+        # THE HONEST RESTART COUNT. Its in-process twin, sensor.
+        # ambient_display_<host>_restarts, can only ever report restarts the
+        # client SURVIVED. When the two disagree, this one is right.
+        (f"{DISCOVERY_PREFIX}/sensor/{NODE}/stop_restarts/config", dict(
+            common, name=f"placard restarts, out of process ({HOST})",
+            unique_id=f"{NODE}_stop_restarts",
+            default_entity_id=f"sensor.{NODE}_stop_restarts",
+            value_template="{{ value_json.restarts }}",
+            state_class="total_increasing",
+            icon="mdi:restart-alert")),
+        # A count with no epoch cannot be read: 12 restarts since a start
+        # three weeks ago is a quiet box, 12 since ten minutes ago is a loop.
+        (f"{DISCOVERY_PREFIX}/sensor/{NODE}/last_stop/config", dict(
+            common, name=f"placard last stop ({HOST})",
+            unique_id=f"{NODE}_last_stop",
+            default_entity_id=f"sensor.{NODE}_last_stop",
+            value_template="{{ value_json.last_stop_utc }}",
+            device_class="timestamp", icon="mdi:clock-alert-outline")),
+    ]
+
+
+def publish(host, port, topic, body, msgs, username="", password=""):
+    """Retained, QoS 1, and gone in seconds whatever the broker is doing."""
+    import paho.mqtt.client as mqtt
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                             client_id=f"display-stop-notify-{HOST}")
+    except AttributeError:                              # paho 1.x
+        client = mqtt.Client(client_id=f"display-stop-notify-{HOST}")
+    if username:
+        client.username_pw_set(username, password)
+    # keepalive doubles as paho's connect timeout. A broker that is simply not
+    # there must not hold up systemd's restart of the placard.
+    client.connect(host, port, keepalive=10)
+    client.loop_start()
+    try:
+        for t, d in msgs:
+            client.publish(t, json.dumps(d, sort_keys=True),
+                           qos=1, retain=True).wait_for_publish(timeout=10)
+        client.publish(topic, body, qos=1, retain=True
+                       ).wait_for_publish(timeout=10)
+    finally:
+        client.disconnect()
+        client.loop_stop()
+
+
+def main():
+    body = payload()
+    log(f"{body['state']} ({body['service_result']}), "
+        f"restarts={body['restarts']}, unit={body['unit'] or '?'}")
+    try:
+        host, port, base, user, pw = mqtt_settings()
+        topic = f"{base}/display/laststop"
+        publish(host, port, topic, json.dumps(body, sort_keys=True),
+                discovery(topic), user, pw)
+        log(f"published {topic}")
+    except Exception as exc:
+        # Loud, and still exit 0. A monitor that cannot reach its broker is a
+        # failed monitor, not a second failure of the thing it watches -- and
+        # it fails in the direction the deadman already covers.
+        log(f"publish FAILED: {type(exc).__name__}: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
